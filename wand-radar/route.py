@@ -149,14 +149,14 @@ def waze_routen(start, ziel):
          "options": "AVOID_TRAILS:t,AVOID_TOLL_ROADS:f,AVOID_FERRIES:f", "subscription": "*"}
     r = requests.get(WAZE, params=p, headers={"User-Agent": "pywaze", "referer": "https://www.waze.com/"}, timeout=30)
     r.raise_for_status()
-    d = r.json()
+    d = json.loads(r.content.decode("utf-8"))        # r.json() würde ohne Zeichensatz im Header Latin-1 annehmen (Umlaute kaputt)
     routen = []
     for a in d.get("alternatives") or [d]:
         resp = a.get("response") or {}
         res, coords = resp.get("results"), a.get("coords")
         if not res or not coords:
             continue
-        routen.append({"name": (resp.get("routeName") or "Route").split(" - ")[0],
+        routen.append({"name": (resp.get("routeName") or "Route").split(" - ")[0].split(",")[0].strip() or "Route",
                        "min": math.ceil(sum(x["crossTime"] for x in res) / 60), "km": round(sum(x["length"] for x in res) / 1000),
                        "pts": pack([[c["y"], c["x"]] for c in coords]), "stau": stau_teile(res, coords)})
     if not routen:
