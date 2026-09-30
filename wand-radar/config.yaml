@@ -1,0 +1,41 @@
+name: Wand-Radar
+version: "0.4.1"
+slug: wand_radar
+description: Rechnet aus dem DWD-Regenradar (WN, +2 h Nowcast) ein fertiges Standbild und Video für ein Wandpanel.
+url: https://github.com/marvinhanno/ha-wand-radar
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+homeassistant_api: true
+services:
+  - mqtt:want
+map:
+  - type: homeassistant_config
+    read_only: false
+    path: /config
+options:
+  zoom: 9
+  width: 1366
+  height: 1024
+  past_minutes: 60
+  fps: 18
+  rain_threshold_dbz: 14
+  timezone: Europe/Berlin
+  preset: veryfast
+  output_dir: /config/www/wand-radar
+schema:
+  latitude: float?
+  longitude: float?
+  zoom: int(6,11)
+  width: int(400,2732)
+  height: int(300,2048)
+  past_minutes: int(0,120)
+  fps: int(6,30)
+  rain_threshold_dbz: int(5,30)
+  timezone: str
+  preset: list(ultrafast|superfast|veryfast|faster|fast|medium|slow)
+  output_dir: str
+  route_calendar: str?
