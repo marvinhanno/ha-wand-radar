@@ -356,6 +356,7 @@ def render(cfg, geo, t0, forecast, out_dir):
         "regen_dauer_min": (((end if end is not None else len(rain)) - start) * STEP) if start is not None else 0,
         "max_mm_h": max((mmh[k] for k in rng), default=0.0),
         "summe_mm": round(sum(mmh[k] for k in rng) * STEP / 60, 2),
+        "verlauf": mmh[now:now + 24],    # mm/h am Zuhause-Punkt ab jetzt, ein Wert je Schritt (STEP min)
     }
     for name in ("still.jpg", "radar.mp4"):
         os.replace(tmp(name), os.path.join(out_dir, name))
@@ -397,7 +398,7 @@ class Mqtt:
     def publish(self, meta):
         if not self.client:
             return
-        keys = ("regnet_jetzt", "regen_ab", "regen_bis", "regen_dauer_min", "max_mm_h", "summe_mm", "t0", "t0_epoch")
+        keys = ("regnet_jetzt", "regen_ab", "regen_bis", "regen_dauer_min", "max_mm_h", "summe_mm", "t0", "t0_epoch", "verlauf")
         p = {k: meta[k] for k in keys}
         p["regen_ab_iso"] = meta["regen_ab_iso"]
         self.client.publish(f"{self.BASE}/state", json.dumps(p), retain=True)
