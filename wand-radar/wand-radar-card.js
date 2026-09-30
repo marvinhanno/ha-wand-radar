@@ -1,4 +1,4 @@
-// wand-radar 1.5 (Routenmodus, zoomt stufenlos auf die Strecke) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.6 (Routenmodus, zoomt stufenlos auf die Strecke) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -78,7 +78,7 @@ const WR_CSS = `
   #vid { opacity: 0; transition: opacity .25s linear; }
   .vshow #vid { opacity: 1; }
   .shade { position: absolute; inset: 0; pointer-events: none; transition: opacity .35s ease; }
-  #shadeRest { background: linear-gradient(180deg, rgba(8,9,11,.9) 0%, rgba(8,9,11,.55) 18%, rgba(8,9,11,0) 36%, rgba(8,9,11,0) 55%, rgba(8,9,11,.82) 70%, rgba(8,9,11,.97) 80%, #0b0d10 100%); }
+  #shadeRest { background: linear-gradient(180deg, rgba(8,9,11,.9) 0%, rgba(8,9,11,.55) 18%, rgba(8,9,11,0) 36%, rgba(8,9,11,0) 66%, rgba(8,9,11,.75) 74%, rgba(8,9,11,.97) 80%, #0b0d10 100%); }
   #shadePlay { opacity: 0; background: linear-gradient(180deg, rgba(8,9,11,.85) 0%, rgba(8,9,11,.4) 16%, rgba(8,9,11,0) 30%, rgba(8,9,11,0) 82%, rgba(8,9,11,.8) 100%); }
   .playing #shadeRest { opacity: 0; } .playing #shadePlay { opacity: 1; }
   .home { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; }
