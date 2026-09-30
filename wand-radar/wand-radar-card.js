@@ -1,4 +1,4 @@
-// wand-radar 1.4 (Routenmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.5 (Routenmodus, zoomt stufenlos auf die Strecke) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -187,7 +187,7 @@ const WR_HTML = `<div id="root">
 
 // ---------- Routenkarte (Web-Mercator wie Leaflet, stufenloser Zoom, Kacheln der nächsthöheren ganzen Stufe) ----------
 const WR_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';
-const WR_ZOOM_MAX = 11;
+const WR_ZOOM_MAX = 16;                      // höchste Kachelstufe der Esri-Grundkarte; kurze Strecken werden bis dahin herangezoomt
 const WR_ROUTE_STATES = ['sensor.wand_aufbruch_quelle', 'input_text.termin_koordinaten', 'input_datetime.termin_start', 'input_text.termin_ort',
   'input_text.wand_reise', 'input_text.wand_reise_live'];
 const wrEsc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -413,22 +413,25 @@ class WandRadar extends HTMLElement {
     if (!r || !r.aktiv) return;
     const rc = this._root.getBoundingClientRect(), W = rc.width || 1366, H = rc.height || 1024;
     const B = { x0: W * 390 / 1366, y0: H * 280 / 1024, x1: W * 1005 / 1366, y1: H * 712 / 1024 };    // freie Fläche zwischen Spalten, Uhr und Leiste
+    // Die ganze Strecke wird stufenlos in die Bühne eingepasst (kurz = weit hinein, lang = weit heraus); ringsum bleibt Platz für die Schilder
+    const F = { x0: B.x0 + W * 60 / 1366, x1: B.x1 - W * 60 / 1366, y0: B.y0 + H * 36 / 1024, y1: B.y1 - H * 36 / 1024 };
     const dot = (p, c, rad, ring) => `<div class="rdot" style="left:${p[0] - rad}px;top:${p[1] - rad}px;width:${2 * rad}px;height:${2 * rad}px;background:${c};box-shadow:0 0 0 3px rgba(0,0,0,.4)${ring ? `,0 0 0 ${rad + 5}px ${c}33` : ''}"></div>`;
     const glow = (P, pts, c, l) => `<path d="${wrPath(P, pts)}" fill="none" stroke="${c}" stroke-opacity=".45" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" filter="url(#gl)"/>` +
       `<path d="${wrPath(P, pts)}" fill="none" stroke="${l}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>`;
-    const chips = [], dots = [];
+    const chips = [], dots = [], pins = [];
     let pts = [r.start], lines = '', sum;
     let K, P;
     if (r.typ === 'auto') {
       const main = r.routen[0], alt = r.routen[1];
       pts = pts.concat(main.pts, alt ? alt.pts : [], [r.ziel]);
-      K = wrFit(pts, B); P = K.P;
+      K = wrFit(pts, F); P = K.P;
       if (alt) lines += `<path d="${wrPath(P, alt.pts)}" fill="none" stroke="#8cc8ff" stroke-opacity=".38" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1 7"/>`;
       lines += glow(P, main.pts, '#8cc8ff', '#b9ddff');
       for (const s of main.stau) lines += `<path d="${wrPath(P, s.pts)}" fill="none" stroke="#ff9f43" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>`;
       const zeit = this._st('input_datetime.termin_start').slice(11, 16), ort = this._st('input_text.termin_ort') || 'Ziel';
       const ziel = P(r.ziel);
       dots.push(dot(P(r.start), '#ffffff', 9, true), dot(ziel, '#8cc8ff', 8, true));
+      pins.push(P(r.start), ziel);
       chips.push({ p: ziel, pref: 'left', html: `${wrIcon('mdi:map-marker', '#8cc8ff')}${wrEsc(ort)}${zeit ? `<span class="d">${zeit}</span>` : ''}` });
       const gross = main.stau.slice().sort((a, b) => b.min - a.min)[0];
       if (gross) chips.push({ p: wrPointAt(P, gross.pts, 0.5), pref: 'left', bg: 'rgba(58,34,10,.9)', bd: 'rgba(255,159,67,.5)', html: `${wrIcon('mdi:car-brake-alert', '#ff9f43')}+${gross.min} min` });
@@ -442,7 +445,7 @@ class WandRadar extends HTMLElement {
       const ab = r.abschnitte;
       let live = {}; try { live = JSON.parse(this._st('input_text.wand_reise_live') || '{}') || {}; } catch (_) { live = {}; }
       ab.forEach((a) => { pts = pts.concat(a.pts, [[a.von.lat, a.von.lon], [a.nach.lat, a.nach.lon]]); });
-      K = wrFit(pts, B); P = K.P;
+      K = wrFit(pts, F); P = K.P;
       const h0 = P(r.start), s0 = P([ab[0].von.lat, ab[0].von.lon]);
       lines += `<path d="M${h0[0]},${h0[1]}L${s0[0]},${s0[1]}" fill="none" stroke="#c4c7cc" stroke-width="2.5" stroke-dasharray="2 5" stroke-linecap="round"/>`;
       ab.forEach((a) => {
@@ -450,11 +453,13 @@ class WandRadar extends HTMLElement {
           : `<path d="${wrPath(P, a.pts)}" fill="none" stroke="#ffcf8a" stroke-opacity=".85" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
       });
       dots.push(dot(h0, '#ffffff', 6, false), dot(s0, '#ffcf8a', 6, false));
+      pins.push(h0, s0);
       const v = parseInt(live.v, 10) || 0, gleis = live.g || ab[0].von.gleis;
       chips.push({ p: s0, pref: 'right', html: `${wrIcon('mdi:bike', '#c4c7cc')}${wrEsc(ab[0].von.name)}` +
         (live.x ? '<span class="x">fällt aus</span>' : `<span class="o">${ab[0].von.ab}${v >= 3 ? ` +${v}` : ''}${gleis ? ` · Gl. ${wrEsc(gleis)}` : ''}</span>`) });
       ab.forEach((a, i) => {
         const p = P([a.nach.lat, a.nach.lon]);
+        pins.push(p);
         if (i < ab.length - 1) {
           dots.push(`<div class="rdot" style="left:${p[0] - 7}px;top:${p[1] - 7}px;width:14px;height:14px;background:#0b0d10;border:3px solid #ffcf8a"></div>`);
           chips.push({ p, pref: 'left', html: `${wrEsc(a.nach.name)}<span class="d">an ${a.nach.an} · ab ${ab[i + 1].von.ab}</span>` });
@@ -470,18 +475,18 @@ class WandRadar extends HTMLElement {
         `<span class="r">${wrDauer(dauer)} · ${um ? `${um} Umstieg${um > 1 ? 'e' : ''}` : 'direkt'}</span>`];
     }
     layer.innerHTML = wrTiles(K, W, H) + `<svg width="${W}" height="${H}" style="position:absolute;left:0;top:0"><defs><filter id="gl" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter></defs>${lines}</svg>` + dots.join('');
-    this._placeChips(layer, chips, B);
+    this._placeChips(layer, chips, B, pins);
     this._$('rsum').innerHTML = sum.join('');
   }
-  _placeChips(layer, chips, B) {      // Schilder neben ihren Punkt setzen: innerhalb der Bühne, ohne einander zu überdecken
-    const placed = [];
+  _placeChips(layer, chips, B, pins) {      // Schilder neben ihren Punkt setzen: innerhalb der Bühne, ohne einander zu überdecken
+    const placed = (pins || []).map((q) => ({ x: q[0] - 10, y: q[1] - 10, w: 20, h: 20 }));       // Start-/Ziel-/Bahnhofspunkte bleiben frei
     for (const c of chips) {
       const e = document.createElement('div');
       e.className = 'rchip'; e.innerHTML = c.html;
       if (c.bg) { e.style.background = c.bg; e.style.borderColor = c.bd; }
       layer.appendChild(e);
       const w = e.offsetWidth, h = e.offsetHeight;
-      const cand = (c.pref === 'right' ? ['right', 'left'] : ['left', 'right']).map((s) => (s === 'left' ? c.p[0] + 14 : c.p[0] - 14 - w));
+      const cand = (c.pref === 'right' ? ['right', 'left'] : ['left', 'right']).map((s) => (s === 'left' ? c.p[0] + 20 : c.p[0] - 20 - w));
       let x = cand.find((v) => v >= B.x0 && v + w <= B.x1);
       if (x === undefined) x = cand[0];
       x = Math.max(B.x0, Math.min(x, B.x1 - w));
