@@ -1,7 +1,9 @@
 """Route-Hintergrund für die Wand-Karte: schreibt route.json (Auto über Waze, Bahn über Transitous).
 
 Läuft als eigener Thread neben dem Radar (nie in dessen Hauptschleife). Liest jede Minute ein paar HA-Helfer, entscheidet ob
-gerade eine Route gebraucht wird (Zeitfenster 3 h vor Termin/Abfahrt) und schreibt dann route.json neben still.jpg/meta.json.
+gerade eine Route gebraucht wird und schreibt dann route.json neben still.jpg/meta.json.
+Auto: einmal je Ziel die Fahrzeit ohne Verkehr (OSRM), Verkehr (Waze) erst ab VORLAUF vor „los“ und nur, solange jemand zu
+Hause ist; die Fahrzeit-Helfer in HA schreibt diese App (einzige Quelle, eine Abfrage für Fahrzeit, Stau und Karte).
 Ergebnisse von Transitous (Bahnhöfe, Gleisverlauf) werden dauerhaft in data_dir/route zwischengespeichert.
 """
 import datetime as dt
@@ -21,8 +23,11 @@ UA = {"User-Agent": "ha-wand-radar/0.3 (Home Assistant add-on)"}
 WAZE = "https://routing-livemap-row.waze.com/RoutingManager/routingRequest"
 OSRM = "https://router.project-osrm.org/route/v1/driving/"
 MOTIS = "https://api.transitous.org/api/"
-FENSTER = dt.timedelta(hours=3)        # so früh vor Termin/Abfahrt wird die Route schon geholt
-AUTO_NEU = 10 * 60                     # Auto: spätestens alle 10 min neu (Verkehr)
+FENSTER = dt.timedelta(hours=3)        # Bahn: so früh vor der Abfahrt wird die Strecke schon geholt
+VORAUS = dt.timedelta(hours=24)        # Auto: Termine so weit voraus bekommen die Fahrzeit ohne Verkehr (OSRM, kostenlos)
+VORLAUF = dt.timedelta(minutes=60)     # Auto: Verkehr ab so lange vor „los“ (dann zeigt die Wand die Aufbruch-Karte)
+T0_FAKTOR = 1.5                        # Auto: „los“ für den Fensterbeginn großzügig aus 1,5 × Fahrzeit ohne Verkehr schätzen
+TAKT, TAKT_NAH, NAH = 10 * 60, 5 * 60, dt.timedelta(minutes=30)   # Verkehr alle 10 min, in den letzten 30 min vor „los“ alle 5 min
 FEHLER_PAUSE = 5 * 60                  # nach einem Fehler erst nach 5 min wieder versuchen
 STAU_FAKTOR, STAU_MIN_S = 1.4, 60      # Abschnitt zählt als Stau ab 1,4-facher Zeit (gegenüber freiem Fluss); Stau erst ab 60 s Verzögerung
 ALT_MAX_MIN = 15                       # Alternative höchstens so viel länger als die schnellste
@@ -38,15 +43,25 @@ def ha_available():
     return bool(os.environ.get("SUPERVISOR_TOKEN") or (os.environ.get("HA_URL") and os.environ.get("HA_TOKEN")))
 
 
+def _ha_base():
+    if os.environ.get("SUPERVISOR_TOKEN"):
+        return "http://supervisor/core/api", os.environ["SUPERVISOR_TOKEN"]
+    return os.environ["HA_URL"].rstrip("/") + "/api", os.environ["HA_TOKEN"]
+
+
 def ha_get(path):
     """GET auf die HA-Core-API, path z. B. '/states/zone.home'."""
-    if os.environ.get("SUPERVISOR_TOKEN"):
-        base, tok = "http://supervisor/core/api", os.environ["SUPERVISOR_TOKEN"]
-    else:
-        base, tok = os.environ["HA_URL"].rstrip("/") + "/api", os.environ["HA_TOKEN"]
+    base, tok = _ha_base()
     r = requests.get(base + path, headers={"Authorization": "Bearer " + tok}, timeout=15)
     r.raise_for_status()
     return r.json()
+
+
+def ha_call(domain, service, data):
+    """HA-Aktion aufrufen, z. B. ha_call('input_number', 'set_value', {...})."""
+    base, tok = _ha_base()
+    r = requests.post(f"{base}/services/{domain}/{service}", json=data, headers={"Authorization": "Bearer " + tok}, timeout=15)
+    r.raise_for_status()
 
 
 # ---------- Geometrie ----------
@@ -147,7 +162,16 @@ def waze_routen(start, ziel):
     p = {"from": f"x:{start[1]} y:{start[0]}", "to": f"x:{ziel[1]} y:{ziel[0]}", "at": 0, "returnJSON": "true",
          "returnGeometries": "true", "returnInstructions": "true", "timeout": 60000, "nPaths": 3,
          "options": "AVOID_TRAILS:t,AVOID_TOLL_ROADS:f,AVOID_FERRIES:f", "subscription": "*"}
-    r = requests.get(WAZE, params=p, headers={"User-Agent": "pywaze", "referer": "https://www.waze.com/"}, timeout=30)
+    global _waze_chrome
+    r = None
+    if not _waze_chrome:
+        r = requests.get(WAZE, params=p, headers={"User-Agent": "pywaze", "referer": "https://www.waze.com/"}, timeout=30)
+        if r.status_code == 403:                     # seit 30.09.2026 sperrt Waze einfache Clients; wie pywaze 1.2.3: als Chrome fragen
+            _waze_chrome, r = True, None
+            log("Waze 403 – ab jetzt mit Chrome-Kennung (curl_cffi)")
+    if r is None:
+        from curl_cffi import requests as cr
+        r = cr.get(WAZE, params=p, headers={"referer": "https://www.waze.com/"}, impersonate="chrome", timeout=30)
     r.raise_for_status()
     d = json.loads(r.content.decode("utf-8"))        # r.json() würde ohne Zeichensatz im Header Latin-1 annehmen (Umlaute kaputt)
     routen = []
@@ -158,10 +182,14 @@ def waze_routen(start, ziel):
             continue
         routen.append({"name": (resp.get("routeName") or "Route").split(" - ")[0].split(",")[0].strip() or "Route",
                        "min": math.ceil(sum(x["crossTime"] for x in res) / 60), "km": round(sum(x["length"] for x in res) / 1000),
+                       "frei": math.ceil(sum(x.get("crossTimeFreeFlow") or x.get("crossTimeWithoutRealTime", 0) for x in res) / 60),
                        "pts": pack([[c["y"], c["x"]] for c in coords]), "stau": stau_teile(res, coords)})
     if not routen:
         raise RuntimeError("Waze lieferte keine Route")
     return routen
+
+
+_waze_chrome = False      # einmal 403 bekommen -> direkt mit Chrome-Kennung fragen (bis zum Neustart)
 
 
 def osrm_routen(start, ziel):
@@ -283,10 +311,13 @@ class RouteWorker:
         self.tz = ZoneInfo(cfg["timezone"])
         self.home = (round(home[0], 5), round(home[1], 5))
         self.bahn = Bahnhoefe(os.path.join(cfg["data_dir"], "route"))
-        self.key = self.geholt = None       # Schlüssel und Zeit (epoch) der zuletzt geschriebenen aktiven Route
+        self.key = self.geholt = self.quelle = None   # Schlüssel, Zeit (epoch) und Quelle der zuletzt geschriebenen aktiven Route
         self.retry = 0.0
         self.kalender = (cfg.get("route_calendar") or "").strip()     # Kalender-Entität mit den Bahnreisen; leer = keine Bahnroute
+        self.praesenz = (cfg.get("route_presence") or "").strip()     # binary_sensor „jemand zu Hause“; leer = immer
         self.aus = None                     # True, wenn zuletzt {"aktiv": false} geschrieben wurde
+        self.t0_koord = self.t0 = self.osrm = None    # Ziel, Fahrzeit ohne Verkehr (min) und OSRM-Routen dazu
+        self.t0_retry = 0.0
 
     def jetzt(self):
         t = os.environ.get("WR_ROUTE_JETZT")          # Test: festes Datum, z. B. 2026-01-15T14:45 (Ortszeit)
@@ -299,6 +330,42 @@ class RouteWorker:
             if e.response is not None and e.response.status_code == 404:
                 return {"state": "", "last_updated": None}
             raise
+
+    def num(self, entity):
+        try:
+            return float(self.zustand(entity)["state"])
+        except (TypeError, ValueError):
+            return 0.0
+
+    def an(self, entity):
+        return self.zustand(entity)["state"] == "on"
+
+    def fahrzeit_setzen(self, minuten, km, stau, quelle, jetzt):
+        """Fahrzeit-Helfer in HA (Aufbruch-Karte, „los“). quelle: 'frei' = ohne Verkehr (OSRM), 'verkehr' = Waze."""
+        try:
+            ha_call("input_text", "set_value", {"entity_id": "input_text.termin_fahrzeit_quelle", "value": quelle})
+            ha_call("input_datetime", "set_datetime", {"entity_id": "input_datetime.termin_fahrzeit_stand",
+                                                       "datetime": jetzt.strftime("%Y-%m-%d %H:%M:%S")})
+            ha_call("input_number", "set_value", {"entity_id": "input_number.termin_km", "value": min(2000, km)})
+            ha_call("input_number", "set_value", {"entity_id": "input_number.termin_stau", "value": min(300, max(0, stau))})
+            ha_call("input_number", "set_value", {"entity_id": "input_number.termin_fahrzeit", "value": min(600, minuten)})
+        except Exception as e:
+            log("HA-Helfer nicht gesetzt:", repr(e))
+
+    def frei_holen(self, koord, jetzt):
+        """Einmal je Ziel die Fahrzeit ohne Verkehr (OSRM, kostenlos). Nach HA nur, solange dort kein Wert mit Verkehr steht."""
+        if self.t0_koord == koord or time.time() < self.t0_retry:
+            return
+        try:
+            routen = auswahl(osrm_routen(self.home, [float(x) for x in koord.split(",")]))
+        except Exception as e:
+            log("OSRM fehlgeschlagen:", repr(e))
+            self.t0_retry = time.time() + FEHLER_PAUSE
+            return
+        self.t0_koord, self.t0, self.osrm = koord, routen[0]["min"], routen
+        if self.zustand("input_text.termin_fahrzeit_quelle")["state"] != "verkehr" or self.num("input_number.termin_fahrzeit") <= 0:
+            self.fahrzeit_setzen(routen[0]["min"], routen[0]["km"], 0, "frei", jetzt)
+        log(f"Ohne Verkehr (OSRM): {routen[0]['name']} {routen[0]['min']} min {routen[0]['km']} km")
 
     def schreiben(self, obj):
         os.makedirs(self.out, exist_ok=True)
@@ -314,8 +381,15 @@ class RouteWorker:
         auto = None
         if re.fullmatch(r"-?\d+(\.\d+)?,-?\d+(\.\d+)?", koord) and re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d", start_s or ""):
             start = dt.datetime.fromisoformat(start_s).replace(tzinfo=self.tz)
-            if start - FENSTER <= jetzt < start:
-                auto = (start, koord)
+            if jetzt < start <= jetzt + VORAUS:
+                self.frei_holen(koord, jetzt)
+                if self.t0_koord == koord:
+                    # Verkehr ab VORLAUF vor „los“; „los“ dafür großzügig geschätzt (1,5 × ohne Verkehr), bzw. aktuelles „los“, falls früher
+                    puffer = self.num("input_number.termin_puffer")
+                    los = start - dt.timedelta(minutes=(self.num("input_number.termin_fahrzeit") or self.t0) + puffer)
+                    beginn = min(start - dt.timedelta(minutes=T0_FAKTOR * self.t0 + puffer), los) - VORLAUF
+                    if jetzt >= beginn:
+                        auto = (start, koord, los)
         reise = os.environ.get("WR_ROUTE_REISE") or self.zustand("input_text.wand_reise")["state"]
         bahn = None
         try:
@@ -334,7 +408,7 @@ class RouteWorker:
             else:
                 bahn = None
         if auto:
-            self.auto(auto[0], auto[1], jetzt)
+            self.auto(*auto, jetzt)
         elif bahn:
             self.reise(bahn[0], bahn[1], jetzt)
         elif self.aus is not True:
@@ -342,35 +416,37 @@ class RouteWorker:
             self.key, self.geholt, self.aus = None, None, True
             log("keine Route nötig")
 
-    def fertig(self, key, obj):
+    def fertig(self, key, obj, quelle=None):
         self.schreiben(obj)
-        self.key, self.geholt, self.aus, self.retry = key, time.time(), False, 0.0
+        self.key, self.geholt, self.quelle, self.aus, self.retry = key, time.time(), quelle, False, 0.0
 
-    def auto(self, start, koord, jetzt):
+    def auto(self, start, koord, los, jetzt):
+        """Verkehr von Waze: alle TAKT, ab NAH vor „los“ alle TAKT_NAH – nur, solange jemand zu Hause ist und die Karte steht."""
+        if (self.praesenz and not self.an(self.praesenz)) or self.an("input_boolean.wand_aufbruch_weg") \
+                or self.an("input_boolean.dienstreise_modus"):
+            return
         key = f"{koord}|{start:%Y-%m-%dT%H:%M}"
-        lu = self.zustand("input_number.termin_fahrzeit").get("last_updated")
-        lu = dt.datetime.fromisoformat(lu).timestamp() if lu else 0
-        neu = key != self.key or time.time() - (self.geholt or 0) >= AUTO_NEU or lu > (self.geholt or 0)
-        if not neu or time.time() < self.retry:
+        takt = TAKT_NAH if jetzt >= los - NAH else TAKT
+        if (key == self.key and self.quelle == "waze" and time.time() - self.geholt < takt) or time.time() < self.retry:
             return
         ziel = [float(x) for x in koord.split(",")]
-        quelle = "waze"
+        obj = {"aktiv": True, "typ": "auto", "t": jetzt.isoformat(timespec="seconds"), "schluessel": key,
+               "start": list(self.home), "ziel": [round(ziel[0], 5), round(ziel[1], 5)]}
         try:
-            routen = waze_routen(self.home, ziel)
+            routen = auswahl(waze_routen(self.home, ziel))
         except Exception as e:
-            log("Waze fehlgeschlagen:", repr(e), "- Rückfall OSRM")
-            quelle = "osrm"
-            try:
-                routen = osrm_routen(self.home, ziel)
-            except Exception as e2:
-                log("OSRM fehlgeschlagen:", repr(e2))
-                self.retry = time.time() + FEHLER_PAUSE
-                return
-        routen = auswahl(routen)
-        self.fertig(key, {"aktiv": True, "typ": "auto", "t": jetzt.isoformat(timespec="seconds"), "quelle": quelle, "schluessel": key,
-                          "start": list(self.home), "ziel": [round(ziel[0], 5), round(ziel[1], 5)], "routen": routen})
-        log(f"Auto {quelle}: {routen[0]['name']} {routen[0]['min']} min {routen[0]['km']} km, Stau {[s['min'] for s in routen[0]['stau']]}, "
-            f"{len(routen) - 1} Alternative")
+            if key == self.key:
+                log("Waze fehlgeschlagen:", repr(e), "- letzte Route bleibt")
+            else:                      # noch keine Route für diesen Termin: Strecke ohne Verkehr zeigen, HA-Helfer bleiben
+                log("Waze fehlgeschlagen:", repr(e), "- Strecke ohne Verkehr (OSRM)")
+                self.fertig(key, dict(obj, quelle="osrm", routen=self.osrm), "osrm")
+            self.retry = time.time() + FEHLER_PAUSE
+            return
+        self.fertig(key, dict(obj, quelle="waze", routen=routen), "waze")
+        r = routen[0]
+        self.fahrzeit_setzen(r["min"], r["km"], r["min"] - r["frei"], "verkehr", jetzt)
+        log(f"Auto waze: {r['name']} {r['min']} min (frei {r['frei']}) {r['km']} km, Stau {[s['min'] for s in r['stau']]}, "
+            f"{len(routen) - 1} Alternative, nächste in {takt // 60} min")
 
     def reise(self, ab, r, jetzt):
         key = r["ab"]

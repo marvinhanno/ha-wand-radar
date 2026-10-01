@@ -444,7 +444,25 @@ def main():
     latest = DWD + (f"composite_wn_{at}.tar" if at else "composite_wn__LATEST.tar")
     once = "--once" in sys.argv or bool(at)
     etag, last_t0, last_ok = None, None, time.time()
+    pause_entity = (cfg.get("pause_entity") or "").strip()
+    pausiert = False
     while True:
+        if pause_entity and not once:               # z. B. nachts: nichts holen und rechnen, Sensor "nicht verfügbar"
+            try:
+                p_an = route.ha_get("/states/" + pause_entity)["state"] == "on"
+            except Exception as e:
+                log("Pause-Entität nicht lesbar:", repr(e))
+                p_an = False
+            if p_an != pausiert:
+                pausiert = p_an
+                log("Pause:", pause_entity, "an – Radar ruht" if p_an else "aus – Radar rechnet wieder")
+                if p_an:
+                    mq.offline()
+                else:
+                    etag, last_ok = None, time.time()
+            if pausiert:
+                time.sleep(POLL)
+                continue
         try:
             h = requests.head(latest, headers=UA, timeout=30)
             h.raise_for_status()

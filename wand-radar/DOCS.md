@@ -14,12 +14,23 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
 6. **Route** (eigener Thread, `route.py`, seit 0.3.0): schreibt jede Minute bei Bedarf `route.json` neben die Radardateien –
    die Strecke, die die Karte im Routenmodus als Hintergrund zeichnet. Gelesen werden die HA-Helfer `input_text.termin_koordinaten`,
-   `input_datetime.termin_start`, `input_number.termin_fahrzeit`, `input_text.wand_reise` und `sensor.wand_aufbruch_quelle`
+   `input_datetime.termin_start`, `input_number.termin_fahrzeit`, `input_number.termin_puffer`, `input_text.wand_reise`,
+   `input_boolean.wand_aufbruch_weg`, `input_boolean.dienstreise_modus` und `sensor.wand_aufbruch_quelle`
    (Namen aus der persönlichen HA-Einrichtung; ohne sie bleibt die Route aus).
-   - Auto: bis 3 h vor dem Termin die schnellste Route von Waze (inkl. Stau-Abschnitte und eine Alternative), Rückfall OSRM.
+   - Auto (seit 0.6.0 einzige Quelle der Fahrzeit): einmal je Ziel (Termine bis 24 h voraus) die Fahrzeit ohne Verkehr von OSRM
+     (kostenlos) → HA-Helfer `termin_fahrzeit`/`termin_km`, `termin_stau` = 0, `input_text.termin_fahrzeit_quelle` = `frei`,
+     `input_datetime.termin_fahrzeit_stand`. Verkehr von Waze erst ab 60 min vor „los“ (los geschätzt mit 1,5 × Fahrzeit ohne
+     Verkehr + Puffer), alle 10 min, in den letzten 30 min vor „los“ alle 5 min, bis Terminbeginn – und nur, solange
+     `route_presence` an ist, die Aufbruch-Karte nicht weggeklickt und kein Dienstreise-Modus. Jede Waze-Abfrage liefert Route,
+     Alternative, Stau-Abschnitte und schreibt die HA-Helfer (`quelle` = `verkehr`, Stau = mit Verkehr − freier Fluss).
+     Waze antwortet einfachen Clients seit 30.09.2026 mit 403; dann fragt die App wie pywaze 1.2.3 mit Chrome-Kennung (`curl_cffi`).
+     Scheitert Waze, bleibt die letzte Route; gab es noch keine, zeigt die Karte die OSRM-Strecke („Strecke ohne Verkehr“), die
+     HA-Helfer bleiben unverändert (Karte zeigt dann das Alter über `termin_fahrzeit_stand`).
    - Bahn: bis 3 h vor der Abfahrt die Zugabschnitte aus dem Kalender der Option `route_calendar` (DB-Navigator-Format), Gleisverlauf von
      Transitous, dauerhaft in `/data/route` zwischengespeichert.
    - Sonst `{"aktiv": false}`. Fehler: alte Datei bleibt, Log `Route: …`, nach 5 min neuer Versuch.
+7. **Pause** (seit 0.6.0): Ist `pause_entity` gesetzt und `on` (z. B. nachts), holt und rechnet die App kein Radar und meldet den
+   Sensor „nicht verfügbar“. Danach rechnet sie sofort neu (fehlende Vergangenheitsbilder holt sie beim DWD nach, ca. 2 min).
 
 ## Optionen
 
@@ -35,6 +46,8 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
 | `preset` | veryfast | x264-Voreinstellung: schneller = weniger Rechenzeit, größere Datei |
 | `output_dir` | `/config/www/wand-radar` | Zielordner |
 | `route_calendar` | leer | Kalender-Entität mit den Bahnreisen (`calendar.…`); leer = keine Bahnroute |
+| `route_presence` | leer | `binary_sensor` „jemand zu Hause“; aus = keine Verkehrsabfragen. Leer = immer abfragen |
+| `pause_entity` | leer | Entität, deren Zustand `on` das Radar pausieren lässt (z. B. nachts); leer = nie |
 
 Route lokal testen: `HA_URL`/`HA_TOKEN` setzen, `WR_ROUTE_JETZT=<ISO-Zeit>` und `WR_ROUTE_REISE=<JSON wie wand_reise>` simulieren Zeit und Reise, `python wand-radar/wand_radar.py --route-once`.
 
