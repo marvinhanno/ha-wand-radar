@@ -1,4 +1,4 @@
-// wand-radar 1.8 (Routen- und Trainingsmodus, Elemente für die Ansicht „Sport“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.9 (Routen- und Trainingsmodus, Elemente für die Ansicht „Sport“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -697,7 +697,8 @@ ha-card { padding: 16px; color: var(--primary-text-color); box-sizing: border-bo
 .werte { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
 .werte b { display: block; font-size: 20px; font-weight: 700; line-height: 1.2; }
 .werte span { font-size: 12px; color: var(--secondary-text-color); }
-.jz { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
+.jz { display: grid; grid-template-columns: 24px 92px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
+.jz .nm { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jz + .jz { margin-top: 12px; }
 .jz ha-icon { --mdc-icon-size: 22px; }
 .jz .bal { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -835,7 +836,7 @@ class WandSport extends HTMLElement {
     const h = typen.map((t) => {
       const kj = (j[t] && j[t].km) || 0, kv = (v[t] && v[t].km) || 0, m = Math.max(kj, kv), c = wsFarbe(t);
       const br = (z, cls) => `<i${cls ? ` class="${cls}"` : ''} style="width:${z > 0 ? Math.max(1, z / m * 100) : 0}%;background:${c}"></i>`;
-      return `<div class="jz">${wsSymbol(t)}<div class="bal" title="${WS_NAMEN[t]}">${br(kj)}${br(kv, 'alt')}</div><div class="zahl">${wsKm(kj)} <span>/ ${wsKm(kv)}</span></div></div>`;
+      return `<div class="jz">${wsSymbol(t)}<span class="nm">${WS_NAMEN[t]}</span><div class="bal">${br(kj)}${br(kv, 'alt')}</div><div class="zahl">${wsKm(kj)} <span>/ ${wsKm(kv)}</span></div></div>`;
     }).join('');
     return { kopf: k, inhalt: h };
   }
