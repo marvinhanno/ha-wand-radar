@@ -1,4 +1,4 @@
-// wand-radar 1.7 (Routen- und Trainingsmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.8 (Routen- und Trainingsmodus, Elemente für die Ansicht „Sport“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -12,6 +12,8 @@
 // - Trainingsmodus (seit 1.7): Ist binary_sensor.wand_training_zeigen an und hat sensor.strava_latest_activity eine Strecke (summary_polyline),
 //   zeichnet die Karte die Strecke im selben Stil wie die Route (Leuchtlinie in Sportartfarbe, km-Marken, Start/Ziel). Vorrang: Route > Training > Radar.
 //   Umschalter dann „Training | Radar“. Keine Strava-Abfrage hier, nur hass.states.
+// - Ansicht „Sport“ (seit 1.8): zweites Element custom:wand-sport (art: woche | letzte | jahr | monate | kalender | bestwerte) in derselben Datei.
+//   Liest nur sensor.strava_stats bzw. sensor.strava_latest_activity (hass.states), keine Abfrage, im HA-Kartenstil (ha-card, Theme-Variablen).
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
@@ -651,3 +653,242 @@ class WandRadar extends HTMLElement {
   }
 }
 if (!customElements.get('wand-radar')) customElements.define('wand-radar', WandRadar);
+
+// ---------- Ansicht „Sport“ (custom:wand-sport, seit 1.8) ----------
+// art: woche · letzte (Strecke + Werte der letzten Aktivität) · jahr (Jahr gegen Vorjahr bis heute) · monate (12 Monate gestapelt) ·
+//      kalender (26 Wochen) · bestwerte.  entity: sensor.strava_stats (letzte: sensor.strava_latest_activity).
+// Datumsrechnung nur mit Kalendertagen (UTC-Tageszähler aus „JJJJ-MM-TT“), nie über toISOString – sonst verrutscht der Tag um die Zeitzone.
+const WS_NAMEN = { running: 'Laufen', walking: 'Spazieren', cycling: 'Rad', hiking: 'Wandern', swimming: 'Schwimmen', strength_training: 'Kraft', yoga: 'Yoga', other: 'Sonstiges' };
+const WS_ORDNUNG = Object.keys(WS_NAMEN);
+const WS_WTAG = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+const WS_MON = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+const wsTag = (s) => { const [y, m, d] = s.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, d) / 86400000); };      // 'JJJJ-MM-TT' -> Tageszähler
+const wsTeile = (n) => { const d = new Date(n * 86400000); return { j: d.getUTCFullYear(), m: d.getUTCMonth() + 1, t: d.getUTCDate(), w: d.getUTCDay() }; };
+const wsHeute = () => { const n = new Date(); return Math.round(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate()) / 86400000); };      // lokales Datum
+const wsKurz = (n) => { const q = wsTeile(n); return `${q.t}.${q.m}.`; };
+const wsDatum = (s) => { const [y, m, d] = s.split('-').map(Number); return `${d}.${m}.${String(y).slice(2)}`; };
+const wsDauer = (min) => (min >= 60 ? `${Math.floor(min / 60)}:${pad(Math.round(min % 60))} h` : `${Math.round(min)} min`);
+const wsKm = (km) => wrZahl(km, km > 0 && km < 10 ? 1 : 0);
+const wsFarbe = (typ) => (WR_SPORT[typ] || WR_SPORT.other)[0];
+const wsSymbol = (typ, c) => `<ha-icon icon="${(WR_SPORT[typ] || WR_SPORT.other)[2]}" style="color:${c || wsFarbe(typ)}"></ha-icon>`;
+const wsPace = (v) => { const s = Math.round(v * 60); return `${Math.floor(s / 60)}:${pad(s % 60)} /km`; };
+const WS_CSS = `
+:host { display: block; }
+.kopf { display: flex; align-items: center; gap: 8px; padding: 2px 8px 10px; color: var(--primary-text-color); }
+.kopf ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); flex: none; }
+.kopf .t { font-size: 16px; font-weight: 500; }
+.kopf .r { margin-left: auto; font-size: 13px; color: var(--secondary-text-color); white-space: nowrap; }
+ha-card { padding: 16px; color: var(--primary-text-color); box-sizing: border-box; }
+.sek { color: var(--secondary-text-color); }
+.leer { color: var(--secondary-text-color); font-size: 14px; padding: 4px 0; }
+.gross { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+.gross b { font-size: 38px; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em; }
+.gross small { font-size: 16px; font-weight: 400; color: var(--secondary-text-color); margin-left: 3px; letter-spacing: 0; }
+.gross .sek { font-size: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 6px 9px; border-radius: 12px; font-size: 14px; font-weight: 500; }
+.chip ha-icon { --mdc-icon-size: 18px; }
+.zeile { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--secondary-text-color); }
+.zeile ha-icon { --mdc-icon-size: 16px; color: #ffa726; flex: none; }
+.karte { position: relative; overflow: hidden; border-radius: 12px; background: #1b1d20; margin-bottom: 14px; }
+.name { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 700; }
+.name ha-icon { --mdc-icon-size: 24px; flex: none; }
+.name span { min-width: 0; overflow-wrap: anywhere; }
+.werte { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.werte b { display: block; font-size: 20px; font-weight: 700; line-height: 1.2; }
+.werte span { font-size: 12px; color: var(--secondary-text-color); }
+.jz { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
+.jz + .jz { margin-top: 12px; }
+.jz ha-icon { --mdc-icon-size: 22px; }
+.jz .bal { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.jz .bal i { display: block; height: 7px; border-radius: 4px; min-width: 3px; }
+.jz .bal i.alt { height: 4px; opacity: .35; }
+.jz .zahl { font-size: 14px; font-weight: 700; text-align: right; white-space: nowrap; }
+.jz .zahl span { font-weight: 400; color: var(--secondary-text-color); }
+.mon { display: flex; align-items: flex-end; gap: 6px; height: 130px; }
+.mon .sp { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.mon .sp div { border-radius: 0; }
+.mon .sp div:first-child { border-radius: 3px 3px 0 0; }
+.monl { display: flex; gap: 6px; margin-top: 8px; }
+.monl span { flex: 1; text-align: center; font-size: 12px; color: var(--secondary-text-color); }
+.monl span.jetzt { color: var(--primary-text-color); font-weight: 700; }
+.kml { position: relative; height: 14px; display: grid; grid-template-columns: repeat(26, minmax(0, 1fr)); gap: 3px; margin-bottom: 4px; font-size: 11px; color: var(--secondary-text-color); }
+.kml span { white-space: nowrap; overflow: visible; }
+.kal { display: grid; grid-template-columns: repeat(26, minmax(0, 1fr)); grid-template-rows: repeat(7, auto); grid-auto-flow: column; gap: 3px; }
+.kal i { display: block; aspect-ratio: 1; border-radius: 2px; background: rgba(127, 127, 127, .2); }
+.kal i.fz { background: none; border: 1px dashed rgba(127, 127, 127, .45); box-sizing: border-box; }
+.leg { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 12px; font-size: 12px; color: var(--secondary-text-color); }
+.leg span { display: inline-flex; align-items: center; gap: 5px; }
+.leg i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.bw { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.bw + .bw { margin-top: 14px; }
+.bw ha-icon { --mdc-icon-size: 24px; }
+.bw .a { font-size: 15px; font-weight: 600; }
+.bw .b { font-size: 12px; color: var(--secondary-text-color); margin-top: 1px; }
+.bw .v { font-size: 16px; font-weight: 700; white-space: nowrap; }
+`;
+class WandSport extends HTMLElement {
+  setConfig(c) {
+    if (!c || !c.art) throw new Error('art fehlt (woche, letzte, jahr, monate, kalender, bestwerte)');
+    this._cfg = Object.assign({}, c);
+    if (!this._cfg.entity) this._cfg.entity = c.art === 'letzte' ? 'sensor.strava_latest_activity' : 'sensor.strava_stats';
+    this._sig = null;
+  }
+  getCardSize() { return 3; }
+  getGridOptions() { return { columns: 12, min_columns: 6 }; }
+  set hass(h) {
+    this._hass = h;
+    const e = h && h.states[this._cfg.entity];
+    const sig = [e ? e.state : '', e ? e.last_updated : '', wsHeute()].join('|');
+    if (sig === this._sig) return;
+    this._sig = sig;
+    this._render();
+  }
+  connectedCallback() {
+    if (this._ro || typeof ResizeObserver === 'undefined') return;
+    this._ro = new ResizeObserver(() => { const k = this.shadowRoot && this.shadowRoot.getElementById('karte'); if (k && k.clientWidth !== this._kw) this._zeichneKarte(); });
+    this._ro.observe(this);
+  }
+  disconnectedCallback() { if (this._ro) { this._ro.disconnect(); this._ro = null; } }
+  _render() {
+    if (!this._cfg || !this._hass) return;
+    if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
+    const e = this._hass.states[this._cfg.entity], a = e ? e.attributes || {} : {};
+    let kopf = ['mdi:run', 'Sport', ''], inhalt = '';
+    const art = this._cfg.art, ok = ['woche', 'letzte', 'jahr', 'monate', 'kalender', 'bestwerte'].includes(art);
+    const b = ok ? this['_' + art](e, a) : this._ohne(kopf, `Unbekannte Art „${wrEsc(art)}“`);
+    kopf = b.kopf; inhalt = b.inhalt;
+    this.shadowRoot.innerHTML = `<style>${WS_CSS}</style><div class="kopf"><ha-icon icon="${kopf[0]}"></ha-icon><span class="t">${wrEsc(kopf[1])}</span><span class="r">${wrEsc(kopf[2])}</span></div><ha-card>${inhalt}</ha-card>`;
+    this._kw = 0;
+    if (this._cfg.art === 'letzte') requestAnimationFrame(() => this._zeichneKarte());
+  }
+  _ohne(kopf, text) { return { kopf, inhalt: `<div class="leer">${text}</div>` }; }
+  _stats(e, a, kopf) { return e && e.state !== 'unavailable' && e.state !== 'unknown' && a.woche ? null : this._ohne(kopf, 'Noch keine Strava-Daten'); }
+
+  _woche(e, a) {
+    const k = ['mdi:calendar-week', 'Diese Woche', ''];
+    const x = this._stats(e, a, k); if (x) return x;
+    const w0 = wsTag(a.woche_start); k[2] = `Mo ${wsKurz(w0)} – heute`;
+    const w = a.woche || {}, g = w.gesamt || { n: 0, km: 0, min: 0 }, v = (a.vorwoche || {}).gesamt;
+    const typen = WS_ORDNUNG.filter((t) => w[t] && w[t].n > 0);
+    const vor = v && v.n ? `Vorwoche ${wrZahl(v.km, 1)} km · ${v.n} ${v.n === 1 ? 'Training' : 'Trainings'}` : '';
+    let h;
+    if (!g.n) h = `<div class="leer" style="font-size:16px;padding-top:0">Noch kein Training diese Woche</div>` + (vor ? `<div class="zeile">${vor}</div>` : '');
+    else {
+      h = `<div class="gross"><span><b>${wrZahl(g.km, 1)}</b><small>km</small></span><span class="sek">${wsDauer(g.min)} · ${g.n} ${g.n === 1 ? 'Training' : 'Trainings'}</span></div>`;
+      h += `<div class="chips">${typen.map((t) => {
+        const q = w[t], c = wsFarbe(t);
+        return `<span class="chip" style="background:${wrRgba(wrHex(c), 0.18)}">${wsSymbol(t)}${q.n}× · ${q.km > 0 ? `${wrZahl(q.km, 1)} km` : wsDauer(q.min)}</span>`;
+      }).join('')}</div>`;
+      if (vor) h += `<div class="zeile" style="margin-top:12px">${vor}</div>`;
+    }
+    const sw = a.serie_wochen || 0, sl = a.serie_laufwochen || 0, teile = [];
+    if (sw >= 2) teile.push(`${sw} Wochen in Folge aktiv`);
+    if (sl >= 2) teile.push(`Laufen ${sl} Wochen`);
+    if (teile.length) h += `<div class="zeile"><ha-icon icon="mdi:fire"></ha-icon>${teile.join(' · ')}</div>`;
+    return { kopf: k, inhalt: h };
+  }
+
+  _letzte(e, a) {
+    const k = ['mdi:map-marker-path', 'Letzte Aktivität', ''];
+    if (!e || e.state === 'unavailable' || e.state === 'unknown' || !a.activity_type) return this._ohne(k, 'Noch keine Aktivität');
+    const d = new Date(e.state), typ = a.activity_type, c = wsFarbe(typ);
+    if (!isNaN(d)) k[2] = `${WS_WTAG[d.getDay()]} ${d.getDate()}.${d.getMonth() + 1}. · ${wrHM(d)}`;
+    this._a = a;
+    const km = a.distance_km || 0, min = a.duration_minutes || 0, w = [];
+    if (km > 0) w.push([wrZahl(km, 2), 'km']);
+    if (min > 0) w.push(min >= 120 ? [`${Math.floor(min / 60)}:${pad(Math.round(min % 60))}`, 'h'] : [String(Math.round(min)), 'min']);
+    const t = wrTempo(typ, km, min, a.pace);
+    if (t) { const i = t.indexOf(' '); w.push([t.slice(0, i), t.slice(i + 1)]); }
+    if (a.avg_heart_rate) w.push([String(Math.round(a.avg_heart_rate)), 'Puls Ø']);
+    else if (a.elevation_gain_m >= 20 && w.length < 4) w.push([String(Math.round(a.elevation_gain_m)), 'Höhenmeter']);
+    const karte = (a.summary_polyline || '').length > 4 ? '<div class="karte" id="karte" style="height:210px"></div>' : '';
+    return { kopf: k, inhalt: karte +
+      `<div class="name">${wsSymbol(typ, c)}<span>${wrEsc(a.name || WS_NAMEN[typ] || 'Aktivität')}</span></div>` +
+      `<div class="werte">${w.map(([z, l]) => `<div><b>${z}</b><span>${l}</span></div>`).join('')}</div>` };
+  }
+  _zeichneKarte() {                                    // Strecke im selben Stil wie die Wand (Esri-Kacheln + Leuchtlinie), passt sich der Breite an
+    const box = this.shadowRoot && this.shadowRoot.getElementById('karte'), a = this._a;
+    if (!box || !a) return;
+    const W = box.clientWidth, H = box.clientHeight;
+    if (!W || !H) return;
+    this._kw = W;
+    const pts = wrDecode(a.summary_polyline);
+    if (pts.length < 2) { box.style.display = 'none'; return; }
+    const [halo, linie] = WR_SPORT[a.activity_type] || WR_SPORT.other, r = 26;
+    const K = wrFit(pts, { x0: r, y0: r, x1: W - r, y1: H - r }), P = K.P;
+    const dot = (p, c, rad) => `<div style="position:absolute;border-radius:50%;left:${p[0] - rad}px;top:${p[1] - rad}px;width:${2 * rad}px;height:${2 * rad}px;background:${c};box-shadow:0 0 0 3px rgba(0,0,0,.45)"></div>`;
+    const s0 = P(pts[0]), e0 = P(pts[pts.length - 1]), schleife = wrMeter(pts[0], pts[pts.length - 1]) < 150;
+    const d = wrPath(P, pts);
+    box.innerHTML = wrTiles(K, W, H) + `<svg width="${W}" height="${H}" style="position:absolute;left:0;top:0"><defs><filter id="gl" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter></defs>` +
+      `<path d="${d}" fill="none" stroke="${halo}" stroke-opacity=".5" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" filter="url(#gl)"/>` +
+      `<path d="${d}" fill="none" stroke="${linie}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>` +
+      (schleife ? '' : dot(e0, linie, 6)) + dot(s0, '#ffffff', 7);
+  }
+
+  _jahr(e, a) {
+    const heute = wsTeile(wsHeute()), k = ['mdi:chart-bar', `${heute.j} bis heute`, `km · Vorjahr bis ${heute.t}.${heute.m}.`];
+    const x = this._stats(e, a, k); if (x) return x;
+    const j = a.jahr || {}, v = a.vorjahr_bis_heute || {};
+    const typen = WS_ORDNUNG.filter((t) => ((j[t] && j[t].km) || 0) > 0 || ((v[t] && v[t].km) || 0) > 0);
+    if (!typen.length) return this._ohne(k, 'Noch keine Strecken');
+    const h = typen.map((t) => {
+      const kj = (j[t] && j[t].km) || 0, kv = (v[t] && v[t].km) || 0, m = Math.max(kj, kv), c = wsFarbe(t);
+      const br = (z, cls) => `<i${cls ? ` class="${cls}"` : ''} style="width:${z > 0 ? Math.max(1, z / m * 100) : 0}%;background:${c}"></i>`;
+      return `<div class="jz">${wsSymbol(t)}<div class="bal" title="${WS_NAMEN[t]}">${br(kj)}${br(kv, 'alt')}</div><div class="zahl">${wsKm(kj)} <span>/ ${wsKm(kv)}</span></div></div>`;
+    }).join('');
+    return { kopf: k, inhalt: h };
+  }
+
+  _monate(e, a) {
+    const k = ['mdi:chart-line', '12 Monate', ''];
+    const x = this._stats(e, a, k); if (x) return x;
+    const mo = a.monate || [];
+    const sum = (m) => Object.values(m.km || {}).reduce((s, v) => s + v, 0);
+    const max = Math.max(1, ...mo.map(sum));
+    k[2] = `max. ${Math.round(Math.max(...mo.map(sum), 0))} km`;
+    const jetzt = mo.length - 1;
+    const spalten = mo.map((m) => {
+      const segs = WS_ORDNUNG.filter((t) => (m.km || {})[t] > 0).map((t) => `<div style="height:${m.km[t] / max * 100}%;background:${wsFarbe(t)}"></div>`).reverse();
+      return `<div class="sp" title="${WS_MON[parseInt(m.monat.slice(5), 10) - 1]} ${m.monat.slice(0, 4)}: ${wrZahl(sum(m), 1)} km">${segs.join('')}</div>`;
+    }).join('');
+    const lab = mo.map((m, i) => `<span${i === jetzt ? ' class="jetzt"' : ''}>${WS_MON[parseInt(m.monat.slice(5), 10) - 1][0]}</span>`).join('');
+    return { kopf: k, inhalt: `<div class="mon">${spalten}</div><div class="monl">${lab}</div>` };
+  }
+
+  _kalender(e, a) {
+    const k = ['mdi:calendar-month', 'Aktivitätskalender', '26 Wochen'];
+    const x = this._stats(e, a, k); if (x) return x;
+    const start = wsTag(a.woche_start) - 25 * 7, heute = wsHeute(), akt = {}, typen = new Set();
+    for (const [dt, typ] of a.tage || []) { akt[wsTag(dt)] = typ; typen.add(typ); }
+    let zellen = '';
+    for (let c = 0; c < 26; c++) for (let r = 0; r < 7; r++) {
+      const n = start + c * 7 + r, typ = akt[n];
+      zellen += n > heute ? '<i class="fz"></i>' : typ ? `<i style="background:${wsFarbe(typ)}" title="${wsKurz(n)} ${WS_NAMEN[typ] || ''}"></i>` : '<i></i>';
+    }
+    // Monatsbeschriftung: erste Spalte = Monat ihres Montags, danach die Spalte, in der ein Monat beginnt (der 1.); der letzte Monat
+    // steht rechtsbündig, wenn die Spalte zu nah am Rand liegt. Zu enge Folgen (< 3 Spalten) fallen weg.
+    const mm = [[0, wsTeile(start).m]];
+    for (let c = 1; c < 26; c++) for (let r = 0; r < 7; r++) { const q = wsTeile(start + c * 7 + r); if (q.t === 1) mm.push([c, q.m]); }
+    if (mm.length > 1 && mm[1][0] < 3) mm.shift();
+    const lab = mm.map(([c, m]) => (c > 22 ? `<span style="grid-row:1;grid-column:${c - 1} / 27;text-align:right">${WS_MON[m - 1]}</span>` : `<span style="grid-row:1;grid-column:${c + 1} / span 3">${WS_MON[m - 1]}</span>`)).join('');
+    const leg = WS_ORDNUNG.filter((t) => typen.has(t)).map((t) => `<span><i style="background:${wsFarbe(t)}"></i>${WS_NAMEN[t]}</span>`).join('');
+    return { kopf: k, inhalt: `<div class="kml">${lab}</div><div class="kal">${zellen}</div><div class="leg">${leg}</div>` };
+  }
+
+  _bestwerte(e, a) {
+    const k = ['mdi:trophy-outline', 'Bestwerte', ''];
+    const x = this._stats(e, a, k); if (x) return x;
+    const b = a.bestwerte || {}, z = [];
+    const run = wsFarbe('running'), rad = wsFarbe('cycling');
+    if (b.schnellster_lauf_5km) z.push(['mdi:run-fast', run, 'Schnellster Lauf ab 5 km', `${wrZahl(b.schnellster_lauf_5km.km, 2)} km · ${wsDatum(b.schnellster_lauf_5km.datum)}`, wsPace(b.schnellster_lauf_5km.pace)]);
+    if (b.laengster_lauf) z.push(['mdi:map-marker-distance', run, 'Längster Lauf', wsDatum(b.laengster_lauf.datum), `${wrZahl(b.laengster_lauf.km, 1)} km`]);
+    if (b.meiste_hoehenmeter) { const q = b.meiste_hoehenmeter; z.push(['mdi:image-filter-hdr', wsFarbe(q.typ), `Meiste Höhenmeter (${WS_NAMEN[q.typ] || 'Sonstiges'})`, `${wrZahl(q.km, 1)} km · ${wsDatum(q.datum)}`, `${Math.round(q.hm).toLocaleString('de-DE')} m`]); }
+    if (b.weiteste_radtour) z.push(['mdi:bike', rad, 'Weiteste Radtour', wsDatum(b.weiteste_radtour.datum), `${wrZahl(b.weiteste_radtour.km, 1)} km`]);
+    if (!z.length) return this._ohne(k, 'Noch keine Bestwerte');
+    return { kopf: k, inhalt: z.map(([i, c, t, s, v]) => `<div class="bw"><ha-icon icon="${i}" style="color:${c}"></ha-icon><div><div class="a">${wrEsc(t)}</div><div class="b">${s}</div></div><div class="v">${v}</div></div>`).join('') };
+  }
+}
+if (!customElements.get('wand-sport')) customElements.define('wand-sport', WandSport);
+window.customCards = window.customCards || [];
+if (!window.customCards.some((c) => c.type === 'wand-sport')) window.customCards.push({ type: 'wand-sport', name: 'Wand-Sport (Strava-Statistik)', description: 'Karten der Ansicht Sport' });

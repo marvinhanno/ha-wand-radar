@@ -13,6 +13,8 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    `training_entity` (Standard `sensor.strava_latest_activity`, Attribute `summary_polyline`, `activity_type`, `distance_km`, `duration_minutes`, `pace`, `name`)
    eine Strecke, erscheint sie im Stil der Route (Leuchtlinie je Sportart, km-Marken, Start/Ziel) mit Umschalter „Training | Radar“.
    Vorrang: Route > Training > Radar. Die Karte liest nur `hass.states`, sie fragt weder Strava noch sonst etwas ab.
+   Ab Karte 1.8 (App 0.8.0) liefert dieselbe Datei den zweiten Kartentyp `custom:wand-sport` (Option `art`: `woche`, `letzte`, `jahr`, `monate`, `kalender`, `bestwerte`)
+   für eine Dashboard-Ansicht „Sport“: Statistik aus `sensor.strava_stats` bzw. `sensor.strava_latest_activity` (Fork `ha-workouts`), im HA-Kartenstil, ebenfalls nur `hass.states`.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
