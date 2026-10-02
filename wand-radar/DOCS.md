@@ -9,6 +9,10 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    `still.jpg`, `radar.mp4`, `meta.json` (und `route.json`, s. u.). Beim Start kommt außerdem die Dashboard-Karte `wand-radar-card.js` dazu
    (Dashboard-Ressource `/local/wand-radar/wand-radar-card.js`, Kartentyp `custom:wand-radar`). Ab Karte 1.4 zeichnet sie auch die Route
    (Esri-Kacheln + SVG) mit Umschalter „Route | Radar“, wenn `route.json` aktiv ist und zu den HA-Helfern passt.
+   Ab Karte 1.7 (App 0.7.0) zeichnet sie außerdem ein Training: Ist `training_show` (Standard `binary_sensor.wand_training_zeigen`) an und hat
+   `training_entity` (Standard `sensor.strava_latest_activity`, Attribute `summary_polyline`, `activity_type`, `distance_km`, `duration_minutes`, `pace`, `name`)
+   eine Strecke, erscheint sie im Stil der Route (Leuchtlinie je Sportart, km-Marken, Start/Ziel) mit Umschalter „Training | Radar“.
+   Vorrang: Route > Training > Radar. Die Karte liest nur `hass.states`, sie fragt weder Strava noch sonst etwas ab.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.

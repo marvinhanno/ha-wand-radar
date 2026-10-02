@@ -1,4 +1,4 @@
-// wand-radar 1.6 (Routenmodus, zoomt stufenlos auf die Strecke) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.7 (Routen- und Trainingsmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -9,7 +9,11 @@
 // - Routenmodus (seit 1.4): Steht links die Aufbruch-Karte (sensor.wand_aufbruch_quelle = termin/reise) und die App hat route.json
 //   geschrieben, zeichnet die Karte statt des Radars die Route (Esri-Kacheln + SVG). Umschalter „Route | Radar“ unten rechts.
 //   Setzt --wand-mitte (1/0) auf <html>, damit die Wetterkarte in der Mitte ausblendet.
-// Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20
+// - Trainingsmodus (seit 1.7): Ist binary_sensor.wand_training_zeigen an und hat sensor.strava_latest_activity eine Strecke (summary_polyline),
+//   zeichnet die Karte die Strecke im selben Stil wie die Route (Leuchtlinie in Sportartfarbe, km-Marken, Start/Ziel). Vorrang: Route > Training > Radar.
+//   Umschalter dann „Training | Radar“. Keine Strava-Abfrage hier, nur hass.states.
+// Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
+//   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
 function wandSeiten(playing) {
   const s = document.documentElement.style;
@@ -234,12 +238,53 @@ const wrMin = (hm) => parseInt(hm.slice(0, 2), 10) * 60 + parseInt(hm.slice(3, 5
 const wrDauer = (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${pad(m % 60)} min` : `${m} min`);
 const wrFern = (zug) => /^(ICE|IC|EC|TGV|RJX?|NJ|EN)\b/.test(zug || '');
 
+// ---------- Training (Strava) ----------
+// Farben je Sportart: Hof, Linie, Symbol (wie die Kontextkarte „Training“ links)
+const WR_SPORT = {
+  running: ['#fc5200', '#ff8a50', 'mdi:run'], cycling: ['#4fc3f7', '#8fdcfb', 'mdi:bike'], walking: ['#81c995', '#a8dbb5', 'mdi:walk'],
+  swimming: ['#b39ddb', '#cfc0ec', 'mdi:swim'], hiking: ['#c5a46d', '#dcc392', 'mdi:hiking'], strength_training: ['#ce93d8', '#e1b8e8', 'mdi:dumbbell'],
+  yoga: ['#f48fb1', '#f8b5cb', 'mdi:yoga'], other: ['#9e9e9e', '#c4c4c4', 'mdi:dots-horizontal'],
+};
+function wrDecode(s) {                       // Google-Polyline, Präzision 5 -> [[lat, lon], …]
+  const out = []; let i = 0, lat = 0, lon = 0;
+  while (i < s.length) {
+    for (let k = 0; k < 2; k++) {
+      let sh = 0, res = 0, b;
+      do { b = s.charCodeAt(i++) - 63; res |= (b & 0x1f) << sh; sh += 5; } while (b >= 0x20);
+      const d = res & 1 ? ~(res >> 1) : res >> 1;
+      if (k === 0) lat += d; else lon += d;
+    }
+    out.push([lat / 1e5, lon / 1e5]);
+  }
+  return out;
+}
+const wrMeter = (a, b) => {                  // Luftlinie in m (Haversine)
+  const r = Math.PI / 180, dl = (b[0] - a[0]) * r, dn = (b[1] - a[1]) * r;
+  const h = Math.sin(dl / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dn / 2) ** 2;
+  return 12742000 * Math.asin(Math.min(1, Math.sqrt(h)));
+};
+const wrZahl = (v, n) => Number(v).toLocaleString('de-DE', { minimumFractionDigits: n, maximumFractionDigits: n });
+const wrHM = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function wrTempo(typ, km, min, pace) {       // Anzeige-Tempo je Sportart; leer, wenn keine Strecke
+  if (!km || !min) return '';
+  if (typ === 'cycling') return `${wrZahl(km / (min / 60), 1)} km/h`;
+  if (typ === 'swimming') { const s = Math.round(min * 60 / (km * 10)); return `${Math.floor(s / 60)}:${pad(s % 60)} /100 m`; }
+  if (typ === 'running' || typ === 'walking' || typ === 'hiking') return pace || '';
+  return '';
+}
+
 class WandRadar extends HTMLElement {
-  setConfig(c) { this._cfg = Object.assign({ base: '/local/wand-radar', max_seconds: 60, stale_min: 20 }, c || {}); }
+  setConfig(c) {
+    this._cfg = Object.assign({ base: '/local/wand-radar', max_seconds: 60, stale_min: 20,
+      training_entity: 'sensor.strava_latest_activity', training_show: 'binary_sensor.wand_training_zeigen' }, c || {});
+  }
   set hass(h) {
     this._hass = h;
     const sig = WR_ROUTE_STATES.map((e) => (h && h.states[e] ? h.states[e].state : '')).join('|');
-    if (sig !== this._rsig) { this._rsig = sig; if (this._$) this._syncRoute(); }
+    const t = h && h.states[this._cfg.training_entity], z = h && h.states[this._cfg.training_show];
+    const a = t ? t.attributes || {} : {};
+    const tsig = [z ? z.state : '', t ? t.state : '', a.source_id, a.name, a.distance_km, a.duration_minutes, (a.summary_polyline || '').length].join('|');
+    if (sig !== this._rsig || tsig !== this._tsig) { this._rsig = sig; this._tsig = tsig; if (this._$) this._sync(); }
   }
   getCardSize() { return 1; }
 
@@ -272,12 +317,12 @@ class WandRadar extends HTMLElement {
       tr.addEventListener('pointermove', (e) => { if (this._scrub) { seek(e); this._touch(); } });
       tr.addEventListener('pointerup', () => { if (!this._scrub) return; this._scrub = false; this._setState('angehalten'); });
       tr.addEventListener('pointercancel', () => { this._scrub = false; });
-      this._$('swRoute').addEventListener('click', (e) => { e.stopPropagation(); this._selectView('route'); });
+      this._$('swRoute').addEventListener('click', (e) => { e.stopPropagation(); this._selectView('karte'); });
       this._$('swRadar').addEventListener('click', (e) => { e.stopPropagation(); this._selectView('radar'); });
       if (window.ResizeObserver) {
         new ResizeObserver(() => this._drawStrip()).observe(tr);
         let rt = 0, rw = 0;
-        new ResizeObserver(() => { const w = this._root.clientWidth; if (w === rw) return; rw = w; clearTimeout(rt); rt = setTimeout(() => { if (this._routeOn) this._drawRoute(); }, 300); }).observe(this._root);
+        new ResizeObserver(() => { const w = this._root.clientWidth; if (w === rw) return; rw = w; clearTimeout(rt); rt = setTimeout(() => { if (this._sv) this._drawSv(); }, 300); }).observe(this._root);
       }
       this._state = 'ruhe';
     }
@@ -285,7 +330,7 @@ class WandRadar extends HTMLElement {
     wandSeiten(false);
     this._loadMeta();
     this._loadRoute();
-    this._applyView();
+    this._sync();
     this._poll = setInterval(() => { this._loadMeta(); this._loadRoute(); }, 60000);
   }
   disconnectedCallback() {
@@ -366,11 +411,11 @@ class WandRadar extends HTMLElement {
   _loadRoute() {
     fetch(`${this._cfg.base}/route.json?t=${Date.now()}`, { cache: 'no-store' })
       .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-      .then((j) => { this._route = j; this._syncRoute(); })
+      .then((j) => { this._route = j; this._sync(); })
       .catch(() => { /* keine Route-Datei (ältere App): Radar wie bisher */ });
   }
   _st(e) { const h = this._hass; return h && h.states[e] ? h.states[e].state : ''; }
-  _syncRoute() {
+  _sync() {
     if (!this._$) return;
     const r = this._route, st = (e) => this._st(e);
     let ok = false;
@@ -382,32 +427,53 @@ class WandRadar extends HTMLElement {
         try { ok = JSON.parse(st('input_text.wand_reise')).ab === r.schluessel; } catch (_) { ok = false; }
       }
     }
-    const war = this._routeOn;
-    this._routeOn = ok;
-    if (ok !== war) { this._rsel = 'route'; clearTimeout(this._rauto); }      // Route neu da: „Route“ vorgewählt
-    const sig = ok ? [r.t, r.schluessel, this._rsig].join('#') : '';
-    if (ok && sig !== this._drawSig) { this._drawSig = sig; this._drawRoute(); }
-    if (!ok) this._drawSig = '';
+    const t = this._training();                                      // Vorrang: Route > Training > Radar
+    const sv = ok ? 'route' : t ? 'training' : '';
+    const key = sv === 'training' ? `training:${t.a.source_id}` : sv;
+    this._routeOn = ok; this._trainOn = !!t;
+    if (key !== this._svKey) { this._svKey = key; this._rsel = 'karte'; clearTimeout(this._rauto); }      // Karte neu da: „Route“/„Training“ vorgewählt
+    this._sv = sv;
+    const sig = sv === 'route' ? ['r', r.t, r.schluessel, this._rsig].join('#') : sv === 'training' ? ['t', this._tsig].join('#') : '';
+    if (sv && sig !== this._drawSig) { this._drawSig = sig; this._drawSv(); }
+    if (!sv) this._drawSig = '';
     this._applyView();
   }
+  _training() {                          // laufendes Training mit Strecke: { st, a, pts } – sonst null (Indoor: nur die Kontextkarte)
+    const h = this._hass; if (!h) return null;
+    const z = h.states[this._cfg.training_show], t = h.states[this._cfg.training_entity];
+    if (!z || z.state !== 'on' || !t || !t.attributes || !t.attributes.summary_polyline) return null;
+    let pts = [];
+    try { pts = wrDecode(t.attributes.summary_polyline); } catch (_) { pts = []; }
+    return pts.length >= 2 && !isNaN(new Date(t.state)) ? { st: t.state, a: t.attributes, pts } : null;
+  }
   _applyView() {
-    const on = !!this._routeOn, view = on && this._rsel === 'route', s = document.documentElement.style;
+    const sv = this._sv, on = !!sv, view = on && this._rsel === 'karte', s = document.documentElement.style;
     this._root.classList.toggle('hasroute', on);
     this._root.classList.toggle('rview', view);
-    s.setProperty('--wand-mitte', view ? '0' : '1');                // Wetterkarte in der Mitte blendet aus, solange die Route zu sehen ist
-    this._$('swRoute').classList.toggle('on', view);
+    s.setProperty('--wand-mitte', view ? '0' : '1');                // Wetterkarte in der Mitte blendet aus, solange die Karte zu sehen ist
+    const b = this._$('swRoute');
+    if (this._svKey !== this._swKey) {                                 // Knopf links: „Route“ bzw. „Training“ (Symbol der Sportart)
+      this._swKey = this._svKey;
+      if (sv === 'route') b.innerHTML = '<ha-icon icon="mdi:map-marker-path"></ha-icon>Route';
+      else if (sv === 'training') {
+        const t = this._training();
+        b.innerHTML = `<ha-icon icon="${(WR_SPORT[t && t.a.activity_type] || WR_SPORT.other)[2]}"></ha-icon>Training`;
+      }
+    }
+    b.classList.toggle('on', view);
     this._$('swRadar').classList.toggle('on', on && !view);
   }
   _selectView(v) {
-    if (!this._routeOn || v === this._rsel) return;
-    if (v === 'route') { this._toRoute(); return; }
+    if (!this._sv || v === this._rsel) return;
+    if (v === 'karte') { this._toKarte(); return; }
     this._rsel = 'radar'; this._applyView(); this._touch();
   }
-  _toRoute() {
-    this._rsel = 'route';
+  _toKarte() {
+    this._rsel = 'karte';
     if (this._state !== 'ruhe') this._stop();
     this._applyView();
   }
+  _drawSv() { if (this._sv === 'route') this._drawRoute(); else if (this._sv === 'training') this._drawTraining(); }
   _drawRoute() {
     const r = this._route, layer = this._$('route');
     if (!r || !r.aktiv) return;
@@ -478,6 +544,48 @@ class WandRadar extends HTMLElement {
     this._placeChips(layer, chips, B, pins);
     this._$('rsum').innerHTML = sum.join('');
   }
+  _drawTraining() {
+    const t = this._training(), layer = this._$('route');
+    if (!t) return;
+    const a = t.a, pts = t.pts, typ = a.activity_type, [halo, linie, icon] = WR_SPORT[typ] || WR_SPORT.other;
+    const rc = this._root.getBoundingClientRect(), W = rc.width || 1366, H = rc.height || 1024;
+    const B = { x0: W * 390 / 1366, y0: H * 280 / 1024, x1: W * 1005 / 1366, y1: H * 712 / 1024 };    // wie bei der Route
+    const F = { x0: B.x0 + W * 60 / 1366, x1: B.x1 - W * 60 / 1366, y0: B.y0 + H * 36 / 1024, y1: B.y1 - H * 36 / 1024 };
+    const K = wrFit(pts, F), P = K.P;
+    const dot = (p, c, rad, ring) => `<div class="rdot" style="left:${p[0] - rad}px;top:${p[1] - rad}px;width:${2 * rad}px;height:${2 * rad}px;background:${c};box-shadow:0 0 0 3px rgba(0,0,0,.4)${ring ? `,0 0 0 ${rad + 5}px ${c}33` : ''}"></div>`;
+    const von = new Date(t.st), bis = new Date(von.getTime() + (a.duration_minutes || 0) * 60000);
+    const s0 = P(pts[0]), e0 = P(pts[pts.length - 1]);
+    const schleife = wrMeter(pts[0], pts[pts.length - 1]) < 150;        // Start und Ende dicht beieinander: ein Schild
+    const km = a.distance_km || 0, pins = [s0, e0], dots = [];
+    // km-Marken: ≤ 15 km jeder km, darüber alle 5 km; entlang der Pixellänge (Anteil k / Gesamt-km); zu dichte Marken entfallen
+    const marken = []; const stufe = km > 15 ? 5 : 1;
+    for (let k = stufe; k < km - 0.3; k += stufe) {
+      const p = wrPointAt(P, pts, k / km);
+      if ([...pins, ...marken.map((m) => m[1])].some((q) => Math.hypot(q[0] - p[0], q[1] - p[1]) < 24)) continue;
+      marken.push([k, p]);
+    }
+    const mk = marken.map(([k, p]) => `<div class="rdot" style="left:${p[0] - 10}px;top:${p[1] - 10}px;width:20px;height:20px;background:#0b0d10;border:2px solid ${linie};font:700 10px Roboto,sans-serif;color:#fff;display:flex;align-items:center;justify-content:center">${k}</div>`).join('');
+    const chips = [];
+    const h = this._hass && this._hass.states['zone.home'];
+    const daheim = h && h.attributes && wrMeter(pts[0], [h.attributes.latitude, h.attributes.longitude]) < 150;
+    if (schleife) {
+      dots.push(dot(s0, '#ffffff', 8, true));
+      chips.push({ p: s0, pref: 'left', html: `${wrIcon(daheim ? 'mdi:home' : 'mdi:flag-checkered')}Start · Ziel<span class="d">${wrHM(von)} – ${wrHM(bis)}</span>` });
+    } else {
+      dots.push(dot(s0, '#ffffff', 8, true), dot(e0, linie, 8, true));
+      chips.push({ p: s0, pref: 'left', html: `${wrIcon(daheim ? 'mdi:home' : 'mdi:flag')}Start<span class="d">${wrHM(von)}</span>` });
+      chips.push({ p: e0, pref: 'left', html: `${wrIcon('mdi:flag-checkered')}Ziel<span class="d">${wrHM(bis)}</span>` });
+    }
+    const d = `${wrPath(P, pts)}`;
+    const linien = `<path d="${d}" fill="none" stroke="${halo}" stroke-opacity=".5" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" filter="url(#gl)"/>` +
+      `<path d="${d}" fill="none" stroke="${linie}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>`;
+    layer.innerHTML = wrTiles(K, W, H) + `<svg width="${W}" height="${H}" style="position:absolute;left:0;top:0"><defs><filter id="gl" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="6"/></filter></defs>${linien}</svg>` + mk + dots.join('');
+    this._placeChips(layer, chips, B, pins.concat(marken.map((m) => m[1])));
+    const tempo = wrTempo(typ, a.distance_km, a.duration_minutes, a.pace);
+    this._$('rsum').innerHTML = [`<span class="k">TRAINING · STRAVA ${wrHM(bis)}</span>`,
+      `<span class="g">${wrEsc(a.name || '')}${km ? ` · ${wrZahl(km, 2)} km` : ''}${tempo ? ` · ${wrEsc(tempo)}` : ''}</span>`,
+      '<span class="r">bis Tagesende</span>'].join('');
+  }
   _placeChips(layer, chips, B, pins) {      // Schilder neben ihren Punkt setzen: innerhalb der Bühne, ohne einander zu überdecken
     const placed = (pins || []).map((q) => ({ x: q[0] - 10, y: q[1] - 10, w: 20, h: 20 }));       // Start-/Ziel-/Bahnhofspunkte bleiben frei
     for (const c of chips) {
@@ -516,7 +624,7 @@ class WandRadar extends HTMLElement {
     clearTimeout(this._auto);
     if (this._state !== 'ruhe') this._auto = setTimeout(() => this._stop(), (this._cfg.max_seconds || 60) * 1000);
     clearTimeout(this._rauto);                                  // Radar statt Route gewählt: 60 s nach der letzten Berührung zurück auf „Route“
-    if (this._routeOn && this._rsel === 'radar') this._rauto = setTimeout(() => this._toRoute(), (this._cfg.max_seconds || 60) * 1000);
+    if (this._sv && this._rsel === 'radar') this._rauto = setTimeout(() => this._toKarte(), (this._cfg.max_seconds || 60) * 1000);
   }
   _tick() {
     if (this._state !== 'laeuft') return;
