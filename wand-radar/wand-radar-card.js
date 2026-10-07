@@ -1,4 +1,4 @@
-// wand-radar 1.12 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.13 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -18,6 +18,8 @@
 //   seit 1.11 mit Lauf-Aussehen (Laufwetter aus sensor.laufwetter: trocken bis, Stundenleiste, bestes Fenster, morgen); liest sensor.training_heute, die Übungen (einheiten) stehen in der Kartenkonfiguration der Ansicht „training“.
 //   seit 1.12 Ansicht „Training“: art: naechste (Winter|Sommer, A/B/C, Start/Erledigt/Woche aussetzen, Korrektur) · einheit (Aufwärmen, Übungen mit Figur, Timer, Pausenleiste) · saison;
 //   Figuren für alle Übungen von A/B/C und das Aufwärmen.
+//   seit 1.13 geführter Modus (Knopf „Geführt“ in art: naechste → Vollbild-Ebene: Aufwärmen automatisch, Satz für Satz, Pausen mit Ring, Zirkel bei Halteübungen;
+//   Fortschritt nur im Browser) und art: einheit als Raster (Aufwärmen über volle Breite, Übungen zeilenweise, Paare in einer Zeile).
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
@@ -1261,6 +1263,7 @@ function wtFrage(titel, text, knoepfe) {
 // Timer: Schritte [{ s, seite, u }] nacheinander; Zeit über Zielzeitpunkt (ziel, ms), angehalten über rest (s) – iOS drosselt Hintergrund-Tabs.
 // art 'auf' (Aufwärmen, läuft durch), 'ueb' (ein Satz, danach satz + 1 bis saetze), 'pause' (Pausenleiste). Nichts wird gespeichert.
 const WT_UHR = { t: {}, karten: new Set(), iv: 0, lock: null };
+const WT_GEF = { s: null, ov: null, iv: 0 };  // geführter Modus (seit 1.13): Stand s, Ebene ov
 const WT_TON = { ctx: null };
 const wtIos = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 function wtTonAn() {                          // nur aus einem Tipp heraus: WebAudio freischalten
@@ -1335,10 +1338,16 @@ function wtUhrTick() {
   const laeuft = wtUhrLaeuft();
   if (laeuft && !WT_UHR.iv) WT_UHR.iv = setInterval(wtUhrTick, 200);
   if (!laeuft && WT_UHR.iv) { clearInterval(WT_UHR.iv); WT_UHR.iv = 0; }
-  if (laeuft !== !!WT_UHR.wach) { WT_UHR.wach = laeuft; wtWach(laeuft); }
+  wtWachPruefen();
   WT_UHR.karten.forEach((k) => k._uhrZeigen());
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden && wtUhrLaeuft()) { WT_UHR.wach = false; wtUhrTick(); } });
+// Bildschirm wach: solange ein Timer läuft oder der geführte Modus offen ist
+function wtWachPruefen() { const soll = wtUhrLaeuft() || !!WT_GEF.ov; if (soll !== !!WT_UHR.wach) { WT_UHR.wach = soll; wtWach(soll); } }
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (wtUhrLaeuft() || WT_GEF.ov) { WT_UHR.wach = false; wtUhrTick(); }      // Wake-Lock nach Rückkehr neu anfordern, Zeit aufholen
+  if (WT_GEF.ov) wtGefTick();
+});
 const wtSeiten = (u) => u.seiten ?? /je Seite/.test(u.dosis || '');
 const wtSchritte = (u) => { const s = +u.timer || 30; return wtSeiten(u) ? [{ s: s / 2, seite: 'links' }, { s: s / 2, seite: 'rechts' }] : [{ s }]; };
 const WT_RING_U = 2 * Math.PI * 19;
@@ -1346,6 +1355,342 @@ const wtUhrHtml = (key, gross) => `<div class="uhr" data-uhr="${key}"><svg width
   `<circle class="rv" cx="23" cy="23" r="19" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="${WT_RING_U.toFixed(1)}" transform="rotate(-90 23 23)"/></svg>` +
   `<div class="uz"><b class="zeit">${gross}</b><span class="info"></span><span class="ton"></span></div>` +
   `<span class="ub neu" role="button" aria-label="Zurücksetzen"><ha-icon icon="mdi:restore"></ha-icon></span><span class="ub play" role="button" aria-label="Start/Pause"><ha-icon icon="mdi:play-circle"></ha-icon></span></div>`;
+// ----- Geführter Modus (seit 1.13): Vollbild-Ebene in document.body, Ablauf aus der Konfiguration der Einheit -----
+// Ablauf: 5 s „Gleich geht's los“ → Aufwärmen (automatisch, ohne Pause) → Übungen. Wiederholungs-Sätze: „Satz fertig“, je Seite links → rechts ohne Pause,
+// danach Pause mit Ring (+30 s, Weiter). Paare (B): abwechselnd, die andere Übung ist die Pause, nach jeder Runde des Paars kurze Pause (pausen[0]),
+// nach der letzten lange (pausen[1]). Übungen mit timer laufen automatisch; haben alle Übungen timer (C), läuft die Einheit als Zirkel (saetze = Runden,
+// wechsel s dazwischen). Fortschritt nur im Browser (localStorage, 4 h), Zeit über Zielzeitpunkt. Nichts wird gespeichert.
+const WT_GEF_KEY = 'wandTrainingGefuehrt';
+const wtSaetze = (u, E) => { const m = /^\s*(\d+)\s*×/.exec(u.dosis || ''); return m ? +m[1] : (+E.saetze || 3); };
+const wtWdh = (u) => { const d = String(u.dosis || '').replace(/^\s*\d+\s*×\s*/, '').replace(/\s*je Seite\s*$/, '').trim(); return /^\d+([–-]\d+)?$/.test(d) ? `${d} Wdh.` : d; };
+const wtSchluessel = (x) => (x.block === 'auf' ? 'auf' : `u${x.u}`);
+function wtGefPlan(E, weg) {
+  const raus = new Set(weg || []), auf = E.aufwaermen || [], ueb = E.uebungen || [], pz = E.pausen || [];
+  const pL = +E.pause || (pz.length ? pz[Math.min(1, pz.length - 1)] : 60), pK = +E.pause_kurz || (pz.length ? pz[0] : 45), wechsel = +E.wechsel || 20;
+  const L = [];
+  const arbeit = (o) => L.push(Object.assign({ typ: 'arbeit' }, o));
+  const pause = (s, art) => L.push({ typ: 'pause', s, art });
+  pause(5, 'start');
+  auf.forEach((u, i) => wtSchritte(u).forEach((x, k) => arbeit({ id: `a${i}.${k}`, block: 'auf', u: i, s: x.s, seite: x.seite, satz: i + 1, saetze: auf.length })));
+  const zirkel = ueb.length > 0 && ueb.every((u) => u.timer);
+  if (zirkel) {
+    const runden = +E.saetze || 2;
+    if (auf.length) pause(wechsel, 'wechsel');
+    for (let r = 1; r <= runden; r++) {
+      ueb.forEach((u, i) => {
+        wtSchritte(u).forEach((x, k) => arbeit({ id: `u${i}.${r}.${k}`, block: 'ueb', u: i, s: x.s, seite: x.seite, satz: r, saetze: runden, zirkel: true }));
+        pause(wechsel, 'wechsel');
+      });
+    }
+  } else {
+    if (auf.length) pause(pK, 'gleich');
+    const paar = {}, gruppen = [];
+    (E.paare || []).forEach((p) => p.forEach((n) => { paar[n] = p; }));
+    for (let i = 0; i < ueb.length; i++) {
+      const p = paar[i + 1];
+      if (p && p[0] === i + 1) { gruppen.push(p.map((n) => n - 1).filter((j) => ueb[j])); i += p.length - 1; } else if (!p) gruppen.push([i]);
+    }
+    gruppen.forEach((g) => {
+      const n = Math.max(...g.map((j) => wtSaetze(ueb[j], E)));
+      for (let satz = 1; satz <= n; satz++) {
+        g.forEach((j) => {
+          const u = ueb[j], sn = wtSaetze(u, E);
+          if (satz > sn) return;
+          const teile = u.timer ? wtSchritte(u) : wtSeiten(u) ? [{ s: 0, seite: 'links' }, { s: 0, seite: 'rechts' }] : [{ s: 0 }];
+          teile.forEach((x, k) => arbeit({ id: `u${j}.${satz}.${k}`, block: 'ueb', u: j, s: x.s, seite: x.seite, satz, saetze: sn, paar: g.length > 1 }));
+        });
+        pause(satz < n && g.length > 1 ? pK : pL, 'pause');
+      }
+    });
+  }
+  L.forEach((x, i) => { if (x.typ === 'pause') x.id = `p${i}`; });
+  // Übersprungene Übungen raus; keine zwei Pausen hintereinander (die erste bleibt, wenn es der Start ist, sonst die spätere), keine am Ende
+  const R = [];
+  L.filter((x) => x.typ !== 'arbeit' || !raus.has(wtSchluessel(x))).forEach((x) => {
+    const v = R[R.length - 1];
+    if (x.typ === 'pause' && v && v.typ === 'pause') { if (v.art !== 'start') R[R.length - 1] = x; } else R.push(x);
+  });
+  while (R.length && R[R.length - 1].typ === 'pause') R.pop();
+  return R;
+}
+function wtGefSpeichern() {
+  try { if (WT_GEF.s) localStorage.setItem(WT_GEF_KEY, JSON.stringify(WT_GEF.s)); else localStorage.removeItem(WT_GEF_KEY); } catch (x) { /* privat/voll */ }
+}
+function wtGefLaden() {
+  try {
+    const s = JSON.parse(localStorage.getItem(WT_GEF_KEY) || 'null');
+    if (s && s.E && !s.ende && Date.now() - s.t0 < 4 * 3600000) return s;
+    localStorage.removeItem(WT_GEF_KEY);
+  } catch (x) { /* egal */ }
+  return null;
+}
+const wtGefLage = () => { const s = WT_GEF.s, plan = wtGefPlan(s.E, s.weg); let i = plan.findIndex((x) => x.id === s.id); if (i < 0) i = 0; return { plan, i, x: plan[i] }; };
+// Schritt i betreten: getimte Schritte starten sofort, „Satz fertig“-Schritte warten
+function wtGefGehe(plan, i) {
+  const s = WT_GEF.s, x = plan[i];
+  if (!x) { s.ende = true; s.fertig = Date.now(); s.ziel = 0; }
+  else { s.id = x.id; s.dauer = x.s || 0; s.rest = x.s || 0; s.ziel = x.s ? Date.now() + x.s * 1000 : 0; s.halt = false; }
+  s.piep = null;
+  wtGefSpeichern(); wtGefRender();
+}
+function wtGefTick() {
+  const s = WT_GEF.s;
+  if (!s || !WT_GEF.ov) return;
+  if (s.ziel && !s.ende) {
+    const jetzt = Date.now(), rest = (s.ziel - jetzt) / 1000, sek = Math.ceil(rest);
+    if (rest > 0) {
+      if (sek <= 3 && sek !== s.piep && sek - rest < 0.6) wtPiep(false);    // 3 · 2 · 1
+      s.piep = sek;
+    } else {
+      if (rest > -1.5) wtPiep(true);                                        // im Hintergrund verpasste Schritte nachholen, nur ein Ton
+      const { plan, i } = wtGefLage();
+      let k = i, ziel = s.ziel;
+      for (;;) {
+        k++;
+        const x = plan[k];
+        if (!x) { s.ende = true; s.fertig = ziel; s.ziel = 0; break; }
+        s.id = x.id; s.dauer = x.s || 0; s.rest = x.s || 0; s.halt = false;
+        if (!x.s) { s.ziel = 0; break; }
+        ziel += x.s * 1000;
+        if (ziel > jetzt) { s.ziel = ziel; break; }
+      }
+      s.piep = null;
+      wtGefSpeichern(); wtGefRender(); return;
+    }
+  }
+  wtGefZeigen();
+}
+const WT_GEF_U = 2 * Math.PI * 88;
+const WT_GEF_CSS = `
+:host { all: initial; position: fixed; inset: 0; z-index: 2147482000; display: block; background: var(--primary-background-color, #111); color: var(--primary-text-color, #e8eaed);
+  font-family: var(--ha-font-family-body, Roboto, -apple-system, sans-serif); --gl: color-mix(in srgb, ${WT_KRAFT} 72%, var(--primary-text-color, #fff)); --fl: rgba(127,127,127,.12);
+  --rd: var(--divider-color, rgba(127,127,127,.25)); -webkit-tap-highlight-color: transparent; }
+.gf { position: absolute; inset: 0; margin: 0 auto; max-width: 560px; display: flex; flex-direction: column; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
+  padding: max(10px, env(safe-area-inset-top)) 20px max(14px, env(safe-area-inset-bottom)); user-select: none; -webkit-user-select: none; }
+.top { display: flex; align-items: center; height: 48px; flex: none; }
+.top .zu { width: 44px; height: 44px; margin-left: -10px; display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--secondary-text-color, #9aa0a6); }
+.top .zu ha-icon { --mdc-icon-size: 28px; }
+.top b { flex: 1; text-align: center; font-size: 18px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top .uhr { width: 54px; text-align: right; font-size: 15px; color: var(--secondary-text-color, #9aa0a6); font-variant-numeric: tabular-nums; }
+.prog { display: flex; gap: 5px; margin-top: 8px; flex: none; }
+.prog i { flex: 1; height: 5px; border-radius: 3px; background: var(--fl); overflow: hidden; position: relative; }
+.prog i.auf { flex: .6; }
+.prog i.weg { opacity: .35; }
+.prog i b { position: absolute; left: 0; top: 0; bottom: 0; background: ${WT_KRAFT}; border-radius: 3px; }
+.meta { display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px; color: var(--secondary-text-color, #9aa0a6); flex: none; }
+.mitte { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; margin-top: 14px; }
+.fig { flex: 1 1 0; min-height: 150px; max-height: 46vh; background: #151517; border-radius: 22px; display: flex; align-items: center; justify-content: center; padding: 10px; box-sizing: border-box; }
+.fig svg { width: 100%; height: 100%; max-height: 100%; }
+.fig.rechts svg { transform: scaleX(-1); }
+.fig.leer { font-size: 64px; font-weight: 800; color: ${WT_KRAFT}; }
+.text { flex: none; }
+.name { font-size: 26px; font-weight: 700; line-height: 1.2; margin-top: 16px; letter-spacing: -.3px; }
+.dosis { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 12px; margin-top: 6px; }
+.seite { font-size: 44px; font-weight: 800; color: var(--gl); line-height: 1.05; letter-spacing: -1px; }
+.wdh { font-size: 24px; font-weight: 500; }
+.last { font-size: 15px; color: var(--secondary-text-color, #9aa0a6); }
+ul { margin: 12px 0 0; padding-left: 20px; font-size: 16px; line-height: 1.45; color: var(--primary-text-color); }
+li + li { margin-top: 3px; }
+.unten { flex: none; margin-top: 14px; }
+.danach { text-align: center; font-size: 14.5px; color: var(--secondary-text-color, #9aa0a6); margin-bottom: 10px; }
+.haupt { width: 100%; min-height: 62px; border-radius: 31px; border: none; background: ${WT_KRAFT}; color: #2a0f33; font: inherit; font-size: 20px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; gap: 10px; cursor: pointer; }
+.haupt ha-icon { --mdc-icon-size: 26px; }
+.nav { display: flex; justify-content: space-between; margin-top: 8px; font-size: 15px; color: var(--secondary-text-color, #9aa0a6); }
+.nav span { display: inline-flex; align-items: center; gap: 6px; padding: 10px 2px; cursor: pointer; }
+.nav span.aus { visibility: hidden; }
+.nav ha-icon { --mdc-icon-size: 20px; }
+.ring { position: relative; flex: none; margin: 0 auto; }
+.ring svg { display: block; width: 100%; height: 100%; }
+.ring .rb { stroke: var(--fl); } .ring .rv { stroke: ${WT_KRAFT}; transition: stroke-dashoffset .2s linear; }
+.ring .rz { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.zeit { font-weight: 800; letter-spacing: -2px; font-variant-numeric: tabular-nums; line-height: 1; }
+.von { font-size: 16px; color: var(--secondary-text-color, #9aa0a6); margin-top: 8px; }
+.blink .rv, .blink .zeit { animation: gfBlink .5s steps(2, start) infinite; }
+@keyframes gfBlink { to { opacity: .15; } }
+.pl { text-align: center; font-size: 15px; font-weight: 700; letter-spacing: .14em; color: var(--secondary-text-color, #9aa0a6); margin: 4px 0 14px; }
+.pmitte { justify-content: center; }
+.pmitte .ring { width: min(64vw, 38vh, 300px); height: min(64vw, 38vh, 300px); }
+.pmitte .zeit { font-size: min(18vw, 11vh, 84px); }
+.kn { display: flex; justify-content: center; gap: 12px; margin-top: 22px; }
+.kn button { min-height: 52px; padding: 0 22px; border-radius: 26px; border: 1px solid var(--rd); background: var(--fl); color: var(--primary-text-color); font: inherit; font-size: 17px;
+  font-weight: 700; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.kn button ha-icon { --mdc-icon-size: 22px; }
+.auto { display: flex; align-items: center; gap: 18px; margin-top: 14px; }
+.auto .ring { width: 124px; height: 124px; margin: 0; }
+.auto .zeit { font-size: 36px; letter-spacing: -1px; }
+.auto .von { font-size: 13px; margin-top: 4px; }
+.auto .kn { flex-direction: column; margin: 0; gap: 8px; flex: 1; }
+.auto .kn button { justify-content: center; min-height: 48px; }
+.gl { display: flex; align-items: center; gap: 14px; padding: 10px 14px 10px 10px; border-radius: 18px; background: var(--fl); border: 1px solid var(--rd); }
+.gl .glf { flex: none; width: 76px; height: 72px; background: #151517; border-radius: 12px; display: flex; align-items: center; justify-content: center; overflow: hidden; font-weight: 800; color: ${WT_KRAFT}; font-size: 24px; }
+.gl .glf svg { width: 70px; height: 70px; }
+.gl small { display: block; font-size: 13px; color: var(--secondary-text-color, #9aa0a6); }
+.gl b { display: block; font-size: 17px; margin-top: 1px; }
+.gl span { display: block; font-size: 14.5px; margin-top: 2px; }
+.gl em { font-style: normal; font-weight: 700; color: var(--gl); }
+.hinw { text-align: center; font-size: 13px; color: var(--secondary-text-color, #9aa0a6); margin-top: 10px; min-height: 16px; }
+.ende { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; }
+.ende ha-icon { --mdc-icon-size: 84px; color: #81c995; }
+.ende b { font-size: 26px; line-height: 1.25; }
+.ende span { font-size: 16px; color: var(--secondary-text-color, #9aa0a6); }
+.ende p { font-size: 15.5px; line-height: 1.5; max-width: 380px; margin: 8px 0 0; }
+@media (min-width: 900px) and (min-aspect-ratio: 5/4) {
+  .gf { max-width: 1040px; padding-left: 32px; padding-right: 32px; }
+  .mitte.zwei { flex-direction: row; gap: 32px; align-items: stretch; }
+  .mitte.zwei .fig { flex: 1.1 1 0; max-height: none; }
+  .mitte.zwei .text { flex: 1 1 0; display: flex; flex-direction: column; justify-content: center; }
+  .mitte.zwei .name { margin-top: 0; font-size: 36px; }
+  .mitte.zwei .seite { font-size: 58px; } .mitte.zwei .wdh { font-size: 30px; } .mitte.zwei .last { font-size: 17px; }
+  .mitte.zwei ul { font-size: 19px; } .meta, .danach { font-size: 16px; } .top b { font-size: 21px; }
+  .unten { width: 100%; max-width: 560px; margin-left: auto; margin-right: auto; }
+  .mitte.zwei .auto .ring { width: 190px; height: 190px; } .mitte.zwei .auto .zeit { font-size: 54px; } .mitte.zwei .auto .von { font-size: 15px; }
+  .mitte.zwei .auto .kn button { min-height: 58px; font-size: 19px; }
+}
+`;
+function wtGefOeffnen() {
+  if (!WT_GEF.s) return;
+  if (!WT_GEF.ov) {
+    const ov = document.createElement('div');
+    ov.className = 'wand-training-gefuehrt';
+    ov.attachShadow({ mode: 'open' });
+    ov.addEventListener('pointerdown', () => { if (!wtTonOk()) wtTonAn(); });
+    ov.shadowRoot.addEventListener('click', wtGefKlick);
+    document.body.appendChild(ov);
+    WT_GEF.ov = ov;
+  }
+  if (!WT_GEF.iv) WT_GEF.iv = setInterval(wtGefTick, 200);
+  wtWachPruefen();
+  wtGefRender();
+}
+function wtGefSchliessen() {
+  if (WT_GEF.ov) WT_GEF.ov.remove();
+  WT_GEF.ov = null; WT_GEF.s = null;
+  clearInterval(WT_GEF.iv); WT_GEF.iv = 0;
+  wtGefSpeichern(); wtWachPruefen();
+  window.dispatchEvent(new CustomEvent('wand-training-wahl'));        // Knopf „Geführt“ in der Ansicht zurücksetzen
+}
+// Bedienung (ein Hörer auf der Ebene, Aktion per data-a)
+function wtGefKlick(ev) {
+  const el = ev.target.closest('[data-a]'), s = WT_GEF.s;
+  if (!el || !s) return;
+  wtTonAn();
+  const a = el.dataset.a;
+  if (a === 'zu') {
+    if (s.ende) { wtGefSchliessen(); return; }
+    wtFrage('Geführtes Training beenden?', 'Der Fortschritt hier geht verloren. Das Watch-Training läuft weiter und zählt trotzdem.',
+      [{ t: 'Beenden', warn: 1, f: wtGefSchliessen }, { t: 'Weitermachen', haupt: 1 }]);
+    return;
+  }
+  const { plan, i, x } = wtGefLage();
+  if (a === 'weiter' || a === 'fertig') { wtGefGehe(plan, i + 1); return; }
+  if (a === 'plus') { if (s.ziel) s.ziel += 30000; else s.rest += 30; s.dauer += 30; wtGefSpeichern(); wtGefZeigen(); return; }
+  if (a === 'halt') {
+    if (s.ziel) { s.rest = Math.max(0, (s.ziel - Date.now()) / 1000); s.ziel = 0; s.halt = true; } else { s.ziel = Date.now() + s.rest * 1000; s.halt = false; s.piep = null; }
+    wtGefSpeichern(); wtGefRender(); return;
+  }
+  if (a === 'zurueck') {
+    let j = i - 1;
+    while (j > 0 && plan[j].typ !== 'arbeit') j--;
+    wtGefGehe(plan, Math.max(0, j)); return;
+  }
+  if (a === 'skip') {
+    // aktuelle Übung (in einer Pause: die nächste) überspringen – alle ihre Sätze/Runden; beim Aufwärmen das ganze Aufwärmen
+    let k = i; while (plan[k] && plan[k].typ !== 'arbeit') k++;
+    if (!plan[k]) return;
+    const key = wtSchluessel(plan[k]);
+    let z = k; while (plan[z] && (plan[z].typ !== 'arbeit' || wtSchluessel(plan[z]) === key)) z++;
+    const zielId = plan[z] ? plan[z].id : null;
+    s.weg = [...new Set([...(s.weg || []), key])];
+    const neu = wtGefPlan(s.E, s.weg);
+    if (x.typ === 'pause' && neu.some((y) => y.id === x.id)) { wtGefSpeichern(); wtGefRender(); return; }
+    wtGefGehe(neu, zielId ? neu.findIndex((y) => y.id === zielId) : neu.length);
+  }
+}
+function wtGefRender() {
+  const s = WT_GEF.s, ov = WT_GEF.ov;
+  if (!s || !ov) return;
+  const E = s.E, auf = E.aufwaermen || [], ueb = E.uebungen || [];
+  const { plan, i, x } = wtGefLage();
+  const U = (y) => (y.block === 'auf' ? auf[y.u] : ueb[y.u]) || {};
+  const top = `<div class="top"><span class="zu" data-a="zu" role="button" aria-label="Beenden"><ha-icon icon="mdi:close"></ha-icon></span><b>${wrEsc(`${s.e} · ${E.name || ''}`)}</b><span class="uhr" id="uhr">${wrHM(new Date())}</span></div>`;
+  if (s.ende || !x) {
+    const min = Math.max(1, Math.round(((s.fertig || Date.now()) - s.t0) / 60000)), weg = (s.weg || []).filter((k) => k !== 'auf').length;
+    ov.shadowRoot.innerHTML = `<style>${WT_GEF_CSS}</style><div class="gf">${top}<div class="ende"><ha-icon icon="mdi:check-decagram"></ha-icon><b>Fertig – Watch-Training beenden</b>` +
+      `<span>${wrEsc(`${s.e} · ${E.name || ''}`)} · ${min} min${weg ? ` · ${weg} übersprungen` : ''}</span>` +
+      `<p>„Funktionales Krafttraining“ auf der Watch beenden – es zählt dann von selbst als ${wrEsc(s.e)}.</p></div>` +
+      `<div class="unten"><button class="haupt" data-a="zu"><ha-icon icon="mdi:check"></ha-icon>Schließen</button></div></div>`;
+    return;
+  }
+  // Fortschritt je Übung (Aufwärmen schmal vorn), Zeile Übung x/n · Satz y/n (in Pausen: was als Nächstes kommt)
+  const vorher = {}, gesamt = {};
+  plan.forEach((y, k) => { if (y.typ !== 'arbeit') return; const key = wtSchluessel(y); gesamt[key] = (gesamt[key] || 0) + 1; if (k < i) vorher[key] = (vorher[key] || 0) + 1; });
+  const weg = new Set(s.weg || []);
+  const seg = (key, kl) => `<i class="${kl}${weg.has(key) ? ' weg' : ''}"><b style="width:${gesamt[key] ? Math.round(100 * (vorher[key] || 0) / gesamt[key]) : 0}%"></b></i>`;
+  const prog = `<div class="prog">${auf.length ? seg('auf', 'auf') : ''}${ueb.map((_, k) => seg(`u${k}`, '')).join('')}</div>`;
+  let b = i; while (plan[b] && plan[b].typ !== 'arbeit') b++;
+  const bez = plan[b] || x;
+  const meta = bez.block === 'auf'
+    ? `<div class="meta"><span>Aufwärmen</span><span>${bez.u + 1} von ${auf.length}</span></div>`
+    : `<div class="meta"><span>Übung ${bez.u + 1} von ${ueb.length}</span><span>${bez.zirkel ? 'Runde' : 'Satz'} ${bez.satz} von ${bez.saetze}</span></div>`;
+  const nav = (zurueck) => `<div class="nav"><span data-a="zurueck" class="${zurueck ? '' : 'aus'}"><ha-icon icon="mdi:skip-previous"></ha-icon>zurück</span>` +
+    `<span data-a="skip">${bez.block === 'auf' ? 'Aufwärmen' : 'Übung'} überspringen<ha-icon icon="mdi:skip-next"></ha-icon></span></div>`;
+  const figur = (y, kl) => { const u = U(y), f = wtFigur(u.id, {}); return f ? `<div class="fig${y.seite === 'rechts' && !WT_POSEN[u.id].spiegel ? ' rechts' : ''}${kl || ''}">${f}</div>` : `<div class="fig leer">${y.block === 'auf' ? '' : y.u + 1}</div>`; };
+  const ring = (gross) => `<div class="ring" id="ring"><svg viewBox="0 0 200 200"><circle class="rb" cx="100" cy="100" r="88" fill="none" stroke-width="${gross ? 13 : 15}"/>` +
+    `<circle class="rv" cx="100" cy="100" r="88" fill="none" stroke-width="${gross ? 13 : 15}" stroke-linecap="round" stroke-dasharray="${WT_GEF_U.toFixed(1)}" transform="rotate(-90 100 100)"/></svg>` +
+    `<div class="rz"><span class="zeit" id="zeit"></span><span class="von" id="von"></span></div></div>`;
+  const kurzName = (y) => { const u = U(y); return y.block === 'auf' || String(u.n || '').length <= 24 ? u.n : wtKurz(u); };
+  const sp = (y) => (y.seite ? `<em>${y.seite}</em> · ` : '');
+  let mitte, unten;
+  if (x.typ === 'pause') {
+    const n = plan[i + 1], u = U(n);
+    const fig = wtFigur(u.id, { still: 'a' });
+    const was = n.block === 'auf' ? `Aufwärmen ${n.u + 1} von ${auf.length}` : `${n.zirkel ? 'Runde' : 'Satz'} ${n.satz} von ${n.saetze}`;
+    mitte = `<div class="mitte pmitte"><div class="pl">${{ start: 'GLEICH GEHT’S LOS', wechsel: 'WECHSEL', gleich: 'GLEICH GEHT’S WEITER' }[x.art] || 'PAUSE'}</div>${ring(true)}` +
+      `<div class="kn"><button data-a="plus">+30 s</button><button data-a="weiter"><ha-icon icon="mdi:skip-next"></ha-icon>Weiter</button></div></div>`;
+    unten = `<div class="unten"><div class="gl"><div class="glf${n.seite === 'rechts' && fig && !WT_POSEN[u.id].spiegel ? ' rechts' : ''}">${fig || (n.block === 'auf' ? '' : n.u + 1)}</div><div><small>Gleich</small><b>${wrEsc(u.n || '')}</b>` +
+      `<span>${sp(n)}${wrEsc(was)}${wtWdh(u) ? ` · ${wrEsc(wtWdh(u))}` : ''}</span></div></div><div class="hinw" id="hinw"></div>${nav(i > 1)}</div>`;
+  } else {
+    const u = U(x), tipps = (x.block === 'ueb' && (u.tipps || []).length) ? `<ul>${u.tipps.map((t) => `<li>${wrEsc(t)}</li>`).join('')}</ul>` : '';
+    const dosis = `<div class="dosis">${x.seite ? `<span class="seite">${x.seite}</span>` : ''}<span class="wdh">${wrEsc(wtWdh(u))}</span>${u.last ? `<span class="last">${wrEsc(u.last)}</span>` : ''}</div>`;
+    // „Danach: …“ aus den nächsten Schritten
+    const n = plan[i + 1], nn = plan[i + 2];
+    let danach;
+    const pTxt = (p) => `${p.art === 'wechsel' ? 'Wechsel' : 'Pause'} ${wtMs(p.s)}`;
+    if (!n) danach = 'Danach: geschafft';
+    else if (n.typ === 'arbeit' && n.block === x.block && n.u === x.u) danach = `Danach: ${n.seite || 'nächster Satz'}${nn && nn.typ === 'pause' ? ` · dann ${pTxt(nn)}` : ''}`;
+    else if (n.typ === 'pause') danach = `Danach: ${pTxt(n)}${!nn ? '' : nn.block === x.block && nn.u === x.u ? ` · dann ${nn.zirkel ? 'Runde' : 'Satz'} ${nn.satz}` : ` · dann ${wrEsc(kurzName(nn))}`}`;
+    else danach = `Danach: ${n.block === 'auf' ? '' : `${n.u + 1} · `}${wrEsc(kurzName(n))}${n.seite ? ` ${n.seite}` : ''}${x.paar ? ' – im Wechsel' : ''}`;
+    if (!x.s) {
+      mitte = `<div class="mitte zwei">${figur(x)}<div class="text"><div class="name">${wrEsc(u.n || '')}</div>${dosis}${tipps}</div></div>`;
+      unten = `<div class="unten"><div class="danach">${danach}</div><button class="haupt" data-a="fertig"><ha-icon icon="mdi:check"></ha-icon>Satz fertig</button>${nav(i > 1)}</div>`;
+    } else {
+      mitte = `<div class="mitte zwei">${figur(x)}<div class="text"><div class="name">${wrEsc(u.n || '')}</div>${dosis}${tipps}` +
+        `<div class="auto">${ring(false)}<div class="kn"><button data-a="halt"><ha-icon icon="${s.halt ? 'mdi:play' : 'mdi:pause'}"></ha-icon>${s.halt ? 'Fortsetzen' : 'Anhalten'}</button>` +
+        `<button data-a="weiter"><ha-icon icon="mdi:skip-next"></ha-icon>Nächste</button></div></div></div></div>`;
+      unten = `<div class="unten"><div class="danach">${danach.replace(/^Danach/, 'Gleich')}</div><div class="hinw" id="hinw"></div>${nav(i > 1)}</div>`;
+    }
+  }
+  ov.shadowRoot.innerHTML = `<style>${WT_GEF_CSS}</style><div class="gf">${top}${prog}${meta}${mitte}${unten}</div>`;
+  wtGefZeigen();
+}
+// Zeit, Ring, Blinken, Uhr und Ton-Hinweis aktualisieren (Takt 200 ms, ohne neu aufzubauen)
+function wtGefZeigen() {
+  const s = WT_GEF.s, R = WT_GEF.ov && WT_GEF.ov.shadowRoot;
+  if (!s || !R) return;
+  const $ = (id) => R.getElementById(id);
+  if ($('uhr')) $('uhr').textContent = wrHM(new Date());
+  if (!$('ring')) return;
+  const rest = s.ziel ? Math.max(0, (s.ziel - Date.now()) / 1000) : s.rest, dauer = s.dauer || 1;
+  $('zeit').textContent = wtMs(rest);
+  $('von').textContent = s.halt ? 'angehalten' : `von ${wtMs(dauer)}`;
+  R.querySelector('.rv').setAttribute('stroke-dashoffset', (WT_GEF_U * (1 - Math.min(1, rest / dauer))).toFixed(1));
+  $('ring').classList.toggle('blink', !!s.ziel && rest <= 3);
+  if ($('hinw')) {
+    const ton = !wtTonOk() ? 'Kein Ton – einmal tippen schaltet ihn ein; der Ring blinkt in den letzten 3 s' : wtIos ? 'Ton bei 0:03 · kein Ton? Stummschalter am iPhone' : 'Ton bei 0:03';
+    $('hinw').textContent = [ton, WT_UHR.lock ? 'Bildschirm bleibt an' : ''].filter(Boolean).join(' · ');
+  }
+}
 const WT_ANS_CSS = `
 :host { --wt-lila: color-mix(in srgb, ${WT_KRAFT} 72%, var(--primary-text-color)); --wt-blau: color-mix(in srgb, #90caf9 70%, var(--primary-text-color));
   --wt-sonne: color-mix(in srgb, #ffb74d 80%, var(--primary-text-color)); --wt-flaeche: rgba(127,127,127,.1); --wt-rand: var(--divider-color, rgba(127,127,127,.25)); }
@@ -1380,6 +1725,7 @@ const WT_ANS_CSS = `
   cursor: pointer; font-family: inherit; background: ${WT_KRAFT}; color: #2a0f33; -webkit-tap-highlight-color: transparent; }
 .btn ha-icon { --mdc-icon-size: 20px; }
 .btn.zwei { background: none; color: var(--primary-text-color); border: 1px solid var(--wt-rand); }
+.btn.gef { flex: none; padding: 0 18px; }
 .watch { display: flex; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--secondary-text-color); align-items: flex-start; line-height: 1.4; }
 .watch ha-icon { --mdc-icon-size: 16px; flex: none; margin-top: 1px; }
 .watch b { font-weight: 500; color: var(--primary-text-color); }
@@ -1390,9 +1736,13 @@ const WT_ANS_CSS = `
 .aus { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--wt-flaeche); font-size: 13.5px; }
 .aus span { flex: 1; } .aus a { color: var(--wt-lila); cursor: pointer; font-weight: 600; }
 .hinweis { font-size: 13px; color: var(--secondary-text-color); margin: -2px 4px 12px; line-height: 1.45; }
-.sp > * { display: inline-block; width: 100%; box-sizing: border-box; margin-bottom: 12px; break-inside: avoid; -webkit-column-break-inside: avoid; vertical-align: top; }
-.sp.zwei { column-count: 2; column-gap: 16px; }
-ha-card.ueb, ha-card.auf { padding: 12px; }
+.sp, .pg { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-bottom: 12px; }
+.pg { margin-bottom: 0; gap: 10px; }
+.sp.zwei, .sp.zwei .pg { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
+.sp .voll { grid-column: 1 / -1; }
+ha-card.ueb, ha-card.auf { padding: 12px; box-sizing: border-box; }
+ha-card.ueb { display: flex; flex-direction: column; }
+.fuss { margin-top: auto; }
 .ug { display: flex; gap: 12px; }
 .fb { flex: none; width: 100px; background: #151517; border-radius: 10px; display: flex; align-items: center; justify-content: center; padding: 6px 0; align-self: flex-start; }
 .fb.leer { height: 84px; font-size: 22px; font-weight: 700; color: ${WT_KRAFT}; }
@@ -1403,7 +1753,6 @@ ul.tp { margin: 6px 0 0; padding-left: 16px; font-size: 12.5px; color: var(--sec
 .st { margin-top: 8px; font-size: 12px; color: var(--secondary-text-color); display: flex; gap: 6px; align-items: flex-start; line-height: 1.4; }
 .st ha-icon { --mdc-icon-size: 14px; flex: none; margin-top: 1px; }
 .paar { border-left: 3px solid rgba(206,147,216,.55); padding-left: 10px; }
-.paar ha-card + ha-card { margin-top: 10px; }
 .pk { font-size: 12px; color: var(--wt-lila); margin: 0 0 8px; display: flex; align-items: center; gap: 6px; }
 .pk ha-icon { --mdc-icon-size: 15px; }
 .uhr { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 8px 10px 12px; border-radius: 10px; background: var(--wt-flaeche); cursor: pointer;
@@ -1493,6 +1842,10 @@ class WandTraining extends HTMLElement {
   connectedCallback() {
     const art = this._cfg && this._cfg.art;
     if (art === 'heute') requestAnimationFrame(() => this._stapelBeobachten());
+    if ((art === 'naechste' || art === 'einheit') && !WT_GEF.ov) {      // geführter Modus übersteht Neuladen/Sperren (localStorage)
+      const g = WT_GEF.s || wtGefLaden();
+      if (g && !g.ende) { WT_GEF.s = g; wtGefOeffnen(); }
+    }
     if (art === 'naechste' || art === 'einheit') {
       this._wahlHoerer = () => { this._sig = null; if (this._hass) this.hass = this._hass; };
       window.addEventListener('wand-training-wahl', this._wahlHoerer);
@@ -1678,6 +2031,7 @@ class WandTraining extends HTMLElement {
     const heuteErl = d.kraft_heute || [];
     // Start-Knopf: läuft eine Einheit (≤ 4 h)?
     let laeuft = null;
+    const gef = WT_GEF.s && !WT_GEF.s.ende ? WT_GEF.s : null;      // geführter Modus offen/unterbrochen
     try { const j = JSON.parse((h.states[c.laeuft] || {}).state || ''); if (j && j.e && Date.now() - new Date(j.t).getTime() < 4 * 3600000) laeuft = j; } catch (x) { /* leer */ }
     const modus = `<span class="mod">${[['winter', 'mdi:snowflake', 'Winter', 'w'], ['sommer', 'mdi:white-balance-sunny', 'Sommer', 's']].map(([m, ic, t, k]) =>
       `<span class="${m === wm ? 'an' : ''}" data-modus="${m}"><ha-icon class="${k}" icon="${ic}"></ha-icon>${t}</span>`).join('')}</span>`;
@@ -1708,7 +2062,8 @@ class WandTraining extends HTMLElement {
     const lz = laeuft && laeuft.e === sel ? new Date(laeuft.t) : null;
     h_ += `<div class="knoepfe">${lz
       ? `<button class="btn zwei" id="start"><ha-icon icon="mdi:timer-play-outline"></ha-icon>${sel} läuft seit ${wrHM(lz)}</button>`
-      : `<button class="btn" id="start"><ha-icon icon="mdi:play"></ha-icon>${sel} starten</button>`}</div>`;
+      : `<button class="btn" id="start"><ha-icon icon="mdi:play"></ha-icon>${sel} starten</button>`}` +
+      `${(E.uebungen || []).length ? `<button class="btn zwei gef" id="gef"><ha-icon icon="mdi:human-male-board"></ha-icon>${gef && gef.e === sel ? 'Fortsetzen' : 'Geführt'}</button>` : ''}</div>`;
     h_ += `<div class="watch"><ha-icon icon="mdi:watch"></ha-icon><span>Watch: <b>Funktionales Krafttraining</b> – zählt als ${sel}${sel === vor ? '' : ' (nach dem Start)'}. Andere Einheit? Oben antippen.` +
       `${(s.eintraege || []).length ? ' Falsch gezählt? Kachel lange drücken.' : ''}</span></div>`;
     h_ += `<div class="links"><span class="l" id="erledigt"><ha-icon icon="mdi:check-circle-outline"></ha-icon>Ohne Watch erledigt</span>${d.pause ? '' : '<span id="aussetzen"><ha-icon icon="mdi:pause-circle-outline"></ha-icon>Woche aussetzen</span>'}</div>`;
@@ -1733,6 +2088,7 @@ class WandTraining extends HTMLElement {
       el.addEventListener('click', () => { if (lang) { lang = false; return; } wtWaehlen(x === vor ? '' : x); });
     });
     $('start').addEventListener('click', () => this._skript('training_starten', { einheit: sel }, lz ? `${sel}: Start erneuert` : `${sel} gestartet – das Watch-Training zählt als ${sel}`));
+    if ($('gef')) $('gef').addEventListener('click', () => this._gefuehrt(sel, E));
     $('erledigt').addEventListener('click', () => wtFrage(`${sel} als erledigt eintragen?`,
       'Für heute, ohne Watch-Aktivität. Kommt sie später doch noch, wird sie an diesen Eintrag gehängt statt doppelt gezählt.',
       [{ t: `${sel} eintragen`, haupt: 1, f: () => this._skript('training_erledigt', { einheit: sel }, `${sel} eingetragen`) }, { t: 'Abbrechen' }]));
@@ -1741,6 +2097,22 @@ class WandTraining extends HTMLElement {
       [{ t: 'Woche aussetzen', haupt: 1, f: () => this._skript('training_woche_aussetzen', { aus: true }, 'Woche ausgesetzt') }, { t: 'Abbrechen' }]));
     if ($('weiter')) $('weiter').addEventListener('click', () => wtFrage('Woche wieder aufnehmen?', 'Das Soll der Woche gilt wieder, die Wand schlägt wieder vor.',
       [{ t: 'Wieder aufnehmen', haupt: 1, f: () => this._skript('training_woche_aussetzen', { aus: false }, 'Woche wieder aufgenommen') }, { t: 'Abbrechen' }]));
+  }
+  // Knopf „Geführt“: ruft script.training_starten (wie „A starten“) und öffnet die Vollbild-Ebene; ein unterbrochener Durchgang derselben Einheit wird fortgesetzt
+  _gefuehrt(sel, E) {
+    wtTonAn();
+    const alt = WT_GEF.s && !WT_GEF.s.ende ? WT_GEF.s : null;
+    if (alt && alt.e === sel) { wtGefOeffnen(); return; }
+    const neu = () => {
+      wtTonAn();
+      this._skript('training_starten', { einheit: sel });
+      WT_GEF.s = { e: sel, E: JSON.parse(JSON.stringify(E)), t0: Date.now(), weg: [] };
+      wtGefOeffnen();
+      wtGefGehe(wtGefPlan(WT_GEF.s.E, []), 0);
+    };
+    if (alt) wtFrage(`Geführt: ${alt.e} ist noch offen`, `Mit ${sel} neu beginnen? Der Fortschritt von ${alt.e} geht verloren.`,
+      [{ t: `${sel} beginnen`, haupt: 1, f: neu }, { t: `${alt.e} fortsetzen`, f: wtGefOeffnen }, { t: 'Abbrechen' }]);
+    else neu();
   }
   // Lange drücken auf eine Kachel: den letzten Eintrag dieser Einheit korrigieren (mit sid gezielt; ohne sid nur, wenn er der letzte überhaupt ist)
   _korrektur(x) {
@@ -1766,7 +2138,7 @@ class WandTraining extends HTMLElement {
     const auf = E.aufwaermen || [];
     if (auf.length) {
       const sum = auf.reduce((x, u) => x + (+u.timer || 30), 0), zu = WT_UHR.zu && WT_UHR.zu[sel];
-      blocks.push(`<ha-card class="auf${zu ? ' zu' : ''}" id="auf"><div class="ak" id="ak"><b>Aufwärmen</b><span>≈ ${Math.max(1, Math.round(sum / 60))} min · ohne Pause</span><ha-icon icon="${zu ? 'mdi:chevron-down' : 'mdi:chevron-up'}"></ha-icon></div>` +
+      blocks.push(`<ha-card class="auf voll${zu ? ' zu' : ''}" id="auf"><div class="ak" id="ak"><b>Aufwärmen</b><span>≈ ${Math.max(1, Math.round(sum / 60))} min · ohne Pause</span><ha-icon icon="${zu ? 'mdi:chevron-down' : 'mdi:chevron-up'}"></ha-icon></div>` +
         `<div class="al">${auf.map((u, i) => `<div class="ar" data-i="${i}"><span>${wrEsc(u.n)}</span><span>${wrEsc(u.dosis || '')}</span></div>`).join('')}</div>${wtUhrHtml(`auf:${sel}`, wtMs(wtSchritte(auf[0])[0].s))}</ha-card>`);
     }
     const ueb = E.uebungen || [], paar = {};
@@ -1777,19 +2149,21 @@ class WandTraining extends HTMLElement {
         `<div class="un"><span class="nr">${i + 1}</span><b>${wrEsc(u.n)}</b></div><div class="ud">${wrEsc(u.dosis || '')}${u.last ? `<span class="sek"> · ${wrEsc(u.last)}</span>` : ''}</div>` +
         `${(u.tipps || []).length ? `<ul class="tp">${u.tipps.map((t) => `<li>${wrEsc(t)}</li>`).join('')}</ul>` : ''}</div></div>` +
         `${u.steigern ? `<div class="st"><ha-icon icon="mdi:trending-up"></ha-icon><span>Steigern: ${wrEsc(u.steigern)}</span></div>` : ''}` +
-        `${u.timer ? wtUhrHtml(`ueb:${sel}:${i}`, wtMs(wtSchritte(u)[0].s)) : ''}</ha-card>`;
+        `${u.timer ? `<div class="fuss">${wtUhrHtml(`ueb:${sel}:${i}`, wtMs(wtSchritte(u)[0].s))}</div>` : ''}</ha-card>`;
     };
+    // Raster: Aufwärmen über volle Breite, Übungen zeilenweise (iPad 2 Spalten, gleiche Zeilenhöhe), ein Paar = eine eigene Zeile
+    let zellen = 0;
     for (let i = 0; i < ueb.length; i++) {
       const p = paar[i + 1];
       if (p && p[0] === i + 1) {
         const glied = p.map((n) => ueb[n - 1] ? karte(ueb[n - 1], n - 1) : '').join('');
-        blocks.push(`<div class="paar"><div class="pk"><ha-icon icon="mdi:swap-vertical"></ha-icon>${p.join(' ↔ ')} im Wechsel · die andere Übung ist die Pause</div>${glied}</div>`);
+        blocks.push(`<div class="paar voll"><div class="pk"><ha-icon icon="mdi:repeat"></ha-icon>${p.join(' ↔ ')} im Wechsel · die andere Übung ist die Pause</div><div class="pg">${glied}</div></div>`);
         i += p.length - 1;
-      } else if (!p) blocks.push(karte(ueb[i], i));
+      } else if (!p) { blocks.push(karte(ueb[i], i)); zellen++; }
     }
     const andere = ['A', 'B', 'C'].filter((x) => x !== sel && einh[x]);
     if (andere.length && this._cfg.andere !== false) {
-      blocks.push(`<ha-card class="ueb"><div class="ak" style="cursor:default"><b>Die anderen Einheiten</b></div>${andere.map((x) =>
+      blocks.push(`<ha-card class="ueb${zellen % 2 ? '' : ' voll'}"><div class="ak" style="cursor:default"><b>Die anderen Einheiten</b></div>${andere.map((x) =>
         `<div class="and" data-e="${x}"><b>${x}</b><div>${wrEsc(einh[x].name || '')}<small>${wrEsc(wtNamen(einh[x]).slice(0, 4).join(' · '))}${wtNamen(einh[x]).length > 4 ? ' …' : ''}</small></div><ha-icon icon="mdi:chevron-right"></ha-icon></div>`).join('')}</ha-card>`);
     }
     const pausen = (E.pausen || [45, 60, 90]).map((p) => `<span class="pw" data-p="${p}">${wtMs(p)}</span>`).join('');

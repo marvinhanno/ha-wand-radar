@@ -25,6 +25,11 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    Aufwärmen mit durchlaufendem Timer, Übungskarten mit Figur, Paare, Timer-Ring für Halteübungen, Pausenleiste; Timer über Zielzeitpunkt, Wake-Lock,
    Ton per WebAudio) und `saison` (Soll/Ist je ISO-Woche aus `sensor.training_stand` und den Läufen in `sensor.strava_stats.liste`, Option `wochen`).
    Figuren gibt es für alle Übungen der Einheiten A/B/C und das Aufwärmen.
+   Ab Karte 1.13 (App 0.13.0) hat `art: naechste` einen Knopf „Geführt“: Er ruft `script.training_starten` und öffnet eine Vollbild-Ebene, die durch die Einheit
+   führt – Aufwärmen automatisch, dann Übung für Übung mit großer Figur, Satz x/y, links/rechts (Seitenwechsel ohne Pause), Knopf „Satz fertig“, Pause mit Ring
+   (+30 s, Weiter) und Vorschau; Paare abwechselnd, Halteübungen automatisch, haben alle Übungen `timer`, läuft die Einheit als Zirkel (`saetze` = Runden,
+   Option `wechsel`, Standard 20 s). Pausen: `pause` (Standard `pausen[1]`), `pause_kurz` nach einer Paar-Runde (Standard `pausen[0]`). Der Fortschritt bleibt nur
+   im Browser (localStorage, 4 h) und übersteht Neuladen und Sperren; gespeichert wird nichts. `art: einheit` zeigt die Übungen ab 640 px als Raster mit zwei Spalten.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
