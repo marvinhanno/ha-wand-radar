@@ -1,4 +1,4 @@
-// wand-radar 1.13 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.14 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -20,6 +20,7 @@
 //   Figuren für alle Übungen von A/B/C und das Aufwärmen.
 //   seit 1.13 geführter Modus (Knopf „Geführt“ in art: naechste → Vollbild-Ebene: Aufwärmen automatisch, Satz für Satz, Pausen mit Ring, Zirkel bei Halteübungen;
 //   Fortschritt nur im Browser) und art: einheit als Raster (Aufwärmen über volle Breite, Übungen zeilenweise, Paare in einer Zeile).
+//   seit 1.14 Ende des geführten Modus mit „Ohne Watch trainiert? Als erledigt eintragen“ (→ script.training_erledigt, wie in art: naechste).
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
@@ -1263,7 +1264,7 @@ function wtFrage(titel, text, knoepfe) {
 // Timer: Schritte [{ s, seite, u }] nacheinander; Zeit über Zielzeitpunkt (ziel, ms), angehalten über rest (s) – iOS drosselt Hintergrund-Tabs.
 // art 'auf' (Aufwärmen, läuft durch), 'ueb' (ein Satz, danach satz + 1 bis saetze), 'pause' (Pausenleiste). Nichts wird gespeichert.
 const WT_UHR = { t: {}, karten: new Set(), iv: 0, lock: null };
-const WT_GEF = { s: null, ov: null, iv: 0 };  // geführter Modus (seit 1.13): Stand s, Ebene ov
+const WT_GEF = { s: null, ov: null, iv: 0, karte: null };  // geführter Modus (seit 1.13): Stand s, Ebene ov, karte = eine Karte der Ansicht (hass/Dienstaufrufe, seit 1.14)
 const WT_TON = { ctx: null };
 const wtIos = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 function wtTonAn() {                          // nur aus einem Tipp heraus: WebAudio freischalten
@@ -1535,6 +1536,9 @@ li + li { margin-top: 3px; }
 .ende b { font-size: 26px; line-height: 1.25; }
 .ende span { font-size: 16px; color: var(--secondary-text-color, #9aa0a6); }
 .ende p { font-size: 15.5px; line-height: 1.5; max-width: 380px; margin: 8px 0 0; }
+.ohne { display: flex; justify-content: center; margin-top: 10px; font-size: 15.5px; color: var(--secondary-text-color, #9aa0a6); }
+.ohne span { display: inline-flex; align-items: center; gap: 8px; padding: 10px 4px; cursor: pointer; text-align: center; }
+.ohne ha-icon { --mdc-icon-size: 20px; flex: none; }
 @media (min-width: 900px) and (min-aspect-ratio: 5/4) {
   .gf { max-width: 1040px; padding-left: 32px; padding-right: 32px; }
   .mitte.zwei { flex-direction: row; gap: 32px; align-items: stretch; }
@@ -1582,6 +1586,13 @@ function wtGefKlick(ev) {
       [{ t: 'Beenden', warn: 1, f: wtGefSchliessen }, { t: 'Weitermachen', haupt: 1 }]);
     return;
   }
+  if (a === 'erledigt') {
+    const k = WT_GEF.karte;
+    if (!k) return;
+    wtFrage(`${s.e} als erledigt eintragen?`, 'Für heute, ohne Watch-Aktivität. Kommt sie später doch noch, wird sie an diesen Eintrag gehängt statt doppelt gezählt.',
+      [{ t: `${s.e} eintragen`, haupt: 1, f: () => { k._skript('training_erledigt', { einheit: s.e }, `${s.e} eingetragen`); s.eingetragen = true; wtGefRender(); } }, { t: 'Abbrechen' }]);
+    return;
+  }
   const { plan, i, x } = wtGefLage();
   if (a === 'weiter' || a === 'fertig') { wtGefGehe(plan, i + 1); return; }
   if (a === 'plus') { if (s.ziel) s.ziel += 30000; else s.rest += 30; s.dauer += 30; wtGefSpeichern(); wtGefZeigen(); return; }
@@ -1616,10 +1627,14 @@ function wtGefRender() {
   const top = `<div class="top"><span class="zu" data-a="zu" role="button" aria-label="Beenden"><ha-icon icon="mdi:close"></ha-icon></span><b>${wrEsc(`${s.e} · ${E.name || ''}`)}</b><span class="uhr" id="uhr">${wrHM(new Date())}</span></div>`;
   if (s.ende || !x) {
     const min = Math.max(1, Math.round(((s.fertig || Date.now()) - s.t0) / 60000)), weg = (s.weg || []).filter((k) => k !== 'auf').length;
-    ov.shadowRoot.innerHTML = `<style>${WT_GEF_CSS}</style><div class="gf">${top}<div class="ende"><ha-icon icon="mdi:check-decagram"></ha-icon><b>Fertig – Watch-Training beenden</b>` +
+    // seit 1.14: ohne Watch gleich hier eintragen (wie „Ohne Watch erledigt“ in art: naechste); schon eingetragen → nur der Hinweis
+    const k = WT_GEF.karte, kh = (k && k._hass && k._cfg && ((k._hass.states[k._cfg.entity] || {}).attributes || {}).daten || {}).kraft_heute || [];
+    const erl = s.eingetragen || kh.includes(s.e);
+    ov.shadowRoot.innerHTML = `<style>${WT_GEF_CSS}</style><div class="gf">${top}<div class="ende"><ha-icon icon="mdi:check-decagram"></ha-icon><b>${erl ? 'Fertig – eingetragen' : 'Fertig – Watch-Training beenden'}</b>` +
       `<span>${wrEsc(`${s.e} · ${E.name || ''}`)} · ${min} min${weg ? ` · ${weg} übersprungen` : ''}</span>` +
-      `<p>„Funktionales Krafttraining“ auf der Watch beenden – es zählt dann von selbst als ${wrEsc(s.e)}.</p></div>` +
-      `<div class="unten"><button class="haupt" data-a="zu"><ha-icon icon="mdi:check"></ha-icon>Schließen</button></div></div>`;
+      (erl ? `<p>${wrEsc(s.e)} ist für heute eingetragen.</p>` : `<p>„Funktionales Krafttraining“ auf der Watch beenden – es zählt dann von selbst als ${wrEsc(s.e)}.</p>`) + `</div>` +
+      `<div class="unten"><button class="haupt" data-a="zu"><ha-icon icon="mdi:check"></ha-icon>Schließen</button>` +
+      (erl || !k ? '' : `<div class="ohne"><span data-a="erledigt" role="button"><ha-icon icon="mdi:check-circle-outline"></ha-icon>Ohne Watch trainiert? Als erledigt eintragen</span></div>`) + `</div></div>`;
     return;
   }
   // Fortschritt je Übung (Aufwärmen schmal vorn), Zeile Übung x/n · Satz y/n (in Pausen: was als Nächstes kommt)
@@ -1846,6 +1861,7 @@ class WandTraining extends HTMLElement {
       const g = WT_GEF.s || wtGefLaden();
       if (g && !g.ende) { WT_GEF.s = g; wtGefOeffnen(); }
     }
+    if ((art === 'naechste' || art === 'einheit') && (!WT_GEF.karte || !WT_GEF.karte.isConnected)) WT_GEF.karte = this;
     if (art === 'naechste' || art === 'einheit') {
       this._wahlHoerer = () => { this._sig = null; if (this._hass) this.hass = this._hass; };
       window.addEventListener('wand-training-wahl', this._wahlHoerer);
@@ -2101,6 +2117,7 @@ class WandTraining extends HTMLElement {
   // Knopf „Geführt“: ruft script.training_starten (wie „A starten“) und öffnet die Vollbild-Ebene; ein unterbrochener Durchgang derselben Einheit wird fortgesetzt
   _gefuehrt(sel, E) {
     wtTonAn();
+    WT_GEF.karte = this;
     const alt = WT_GEF.s && !WT_GEF.s.ende ? WT_GEF.s : null;
     if (alt && alt.e === sel) { wtGefOeffnen(); return; }
     const neu = () => {

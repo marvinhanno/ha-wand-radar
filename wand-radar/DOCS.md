@@ -30,6 +30,8 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    (+30 s, Weiter) und Vorschau; Paare abwechselnd, Halteübungen automatisch, haben alle Übungen `timer`, läuft die Einheit als Zirkel (`saetze` = Runden,
    Option `wechsel`, Standard 20 s). Pausen: `pause` (Standard `pausen[1]`), `pause_kurz` nach einer Paar-Runde (Standard `pausen[0]`). Der Fortschritt bleibt nur
    im Browser (localStorage, 4 h) und übersteht Neuladen und Sperren; gespeichert wird nichts. `art: einheit` zeigt die Übungen ab 640 px als Raster mit zwei Spalten.
+   Ab Karte 1.14 (App 0.14.0) bietet das Ende des geführten Modus zusätzlich „Ohne Watch trainiert? Als erledigt eintragen“ (Rückfrage → `script.training_erledigt`);
+   ist die Einheit heute schon eingetragen (`kraft_heute`), steht dort nur „… ist für heute eingetragen“.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
