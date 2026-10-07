@@ -1,5 +1,5 @@
 name: Wand-Radar
-version: "0.14.0"
+version: "0.15.0"
 slug: wand_radar
 description: Rechnet aus dem DWD-Regenradar (WN, +2 h Nowcast) ein fertiges Standbild und Video für ein Wandpanel.
 url: https://github.com/marvinhanno/ha-wand-radar

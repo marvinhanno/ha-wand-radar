@@ -32,6 +32,9 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    im Browser (localStorage, 4 h) und übersteht Neuladen und Sperren; gespeichert wird nichts. `art: einheit` zeigt die Übungen ab 640 px als Raster mit zwei Spalten.
    Ab Karte 1.14 (App 0.14.0) bietet das Ende des geführten Modus zusätzlich „Ohne Watch trainiert? Als erledigt eintragen“ (Rückfrage → `script.training_erledigt`);
    ist die Einheit heute schon eingetragen (`kraft_heute`), steht dort nur „… ist für heute eingetragen“.
+   Ab Karte 1.15 (App 0.15.0): Scrollt ein `vertical-stack` der Ansicht (`overflow-y: auto` per card_mod, z. B. die linke Wand-Spalte), holt `custom:wand-radar`
+   ihn nach `stapel_sekunden` (Standard 60, 0 = aus) ohne Berührung zurück nach oben. `art: heute` hat die Option `stapel_optional` (Liste „entity=zustand“):
+   Bedingungs-Karten mit so einer Bedingung zählen für die Kompakt-Regel nicht mit und dürfen unter den Rand rutschen.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.

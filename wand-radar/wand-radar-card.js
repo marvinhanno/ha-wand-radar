@@ -1,4 +1,4 @@
-// wand-radar 1.14 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.15 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -21,7 +21,9 @@
 //   seit 1.13 geführter Modus (Knopf „Geführt“ in art: naechste → Vollbild-Ebene: Aufwärmen automatisch, Satz für Satz, Pausen mit Ring, Zirkel bei Halteübungen;
 //   Fortschritt nur im Browser) und art: einheit als Raster (Aufwärmen über volle Breite, Übungen zeilenweise, Paare in einer Zeile).
 //   seit 1.14 Ende des geführten Modus mit „Ohne Watch trainiert? Als erledigt eintragen“ (→ script.training_erledigt, wie in art: naechste).
-// Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
+// - Linke Spalte (seit 1.15): Der Stapel scrollt (card_mod); custom:wand-radar holt ihn nach stapel_sekunden (60) ohne Berührung zurück nach oben.
+//   art: heute zählt für die Kompakt-Regel die Bedingungs-Karten aus stapel_optional („entity=zustand“) nicht mit.
+// Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
 function wandSeiten(playing) {
@@ -45,6 +47,25 @@ function wandReload(btn) {
       });
   };
   tryIt();
+}
+// Scrollende Stapel der Ansicht (seit 1.15: linke Spalte, vertical-stack mit overflow-y: auto per card_mod) nach `sek` Sekunden
+// ohne Berührung zurück nach oben – sonst bliebe z. B. die Aufbruch-Karte oben außer Sicht. Sucht einmal durchs Shadow-DOM, merkt sich die Stapel.
+const WAND_STAPEL = new WeakSet();
+function wandStapelZurueck(sek) {
+  if (!(sek > 0)) return;
+  const lauf = (n) => {
+    if (n.localName === 'hui-vertical-stack-card' && n.shadowRoot) {
+      const r = n.shadowRoot.getElementById('root');
+      if (r && !WAND_STAPEL.has(r) && /auto|scroll/.test(getComputedStyle(r).overflowY)) {
+        WAND_STAPEL.add(r);
+        const merken = () => { clearTimeout(r.__wandT); r.__wandT = setTimeout(() => { if (r.scrollTop > 0) r.scrollTo({ top: 0, behavior: 'smooth' }); }, sek * 1000); };
+        for (const ev of ['scroll', 'pointerdown', 'keydown', 'input']) r.addEventListener(ev, merken, { passive: true });
+      }
+    }
+    if (n.shadowRoot) for (const c of n.shadowRoot.children) lauf(c);
+    for (const c of n.children) lauf(c);
+  };
+  lauf(document.body);
 }
 if (!window.__wandWatchdog) {
   window.__wandWatchdog = true;
@@ -284,7 +305,7 @@ function wrTempo(typ, km, min, pace) {       // Anzeige-Tempo je Sportart; leer,
 
 class WandRadar extends HTMLElement {
   setConfig(c) {
-    this._cfg = Object.assign({ base: '/local/wand-radar', max_seconds: 60, stale_min: 20,
+    this._cfg = Object.assign({ base: '/local/wand-radar', max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
       training_entity: 'sensor.strava_latest_activity', training_show: 'binary_sensor.wand_training_zeigen' }, c || {});
   }
   set hass(h) {
@@ -340,10 +361,11 @@ class WandRadar extends HTMLElement {
     this._loadMeta();
     this._loadRoute();
     this._sync();
-    this._poll = setInterval(() => { this._loadMeta(); this._loadRoute(); }, 60000);
+    clearTimeout(this._stapelT); this._stapelT = setTimeout(() => wandStapelZurueck(this._cfg.stapel_sekunden), 3000);
+    this._poll = setInterval(() => { this._loadMeta(); this._loadRoute(); wandStapelZurueck(this._cfg.stapel_sekunden); }, 60000);
   }
   disconnectedCallback() {
-    clearInterval(this._poll); clearTimeout(this._auto); clearTimeout(this._holdT); clearTimeout(this._rauto); wandSeiten(false);
+    clearInterval(this._poll); clearTimeout(this._stapelT); clearTimeout(this._auto); clearTimeout(this._holdT); clearTimeout(this._rauto); wandSeiten(false);
     document.documentElement.style.setProperty('--wand-mitte', '1');
     window.__wandActive = Math.max(0, (window.__wandActive || 1) - 1);
   }
@@ -1995,7 +2017,8 @@ class WandTraining extends HTMLElement {
     this.shadowRoot.innerHTML = `<style>${WT_CSS}</style><div class="k lauf${this._kompakt ? ' kompakt' : ''}" id="k">${kopf}${weg}${inhalt}</div>`;
   }
   // Platz im linken Wand-Stapel (vertical-stack mit max-height): reicht er nicht für die volle Karte, kompakt zeigen (nur Kopf + Übungszeile).
-  // Gezählt werden alle anderen sichtbaren Karten des Stapels außer der letzten (Einkauf – die darf verschwinden).
+  // Gezählt werden alle anderen sichtbaren Karten des Stapels außer der letzten (Einkauf – die darf verschwinden) und außer den
+  // Bedingungs-Karten aus stapel_optional („entity=zustand“, z. B. input_select.wand_waschmaschine=läuft; seit 1.15) – die dürfen unter den Rand rutschen.
   _stapelFinden() {
     let n = this;
     for (let i = 0; i < 60 && n; i++) {
@@ -2019,9 +2042,10 @@ class WandTraining extends HTMLElement {
     const s = this._stapel; if (!s) return;
     const st = getComputedStyle(s.root), max = parseFloat(st.maxHeight);
     if (!(max > 0)) return;
-    const gap = parseFloat(st.rowGap) || 10, kinder = [...s.root.children];
+    const gap = parseFloat(st.rowGap) || 10, kinder = [...s.root.children], opt = this._cfg.stapel_optional || [];
+    const optional = (x) => { const k = x.config; return !!(k && k.type === 'conditional' && (k.conditions || []).some((b) => opt.includes(`${b.entity}=${[].concat(b.state).join(',')}`))); };
     let summe = 0;
-    kinder.slice(0, -1).forEach((x) => { if (x !== s.ich && !s.ich.contains(x)) { const hh = x.offsetHeight; if (hh > 0) summe += hh + gap; } });
+    kinder.slice(0, -1).forEach((x) => { if (x !== s.ich && !s.ich.contains(x) && !optional(x)) { const hh = x.offsetHeight; if (hh > 0) summe += hh + gap; } });
     const kompakt = summe + (this._vollH[this._aussehen] || (this._aussehen === 'lauf' ? 300 : 235)) > max;
     if (kompakt !== !!this._kompakt) { this._kompakt = kompakt; this._sig = null; this._render(); }
   }
