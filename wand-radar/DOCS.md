@@ -18,6 +18,8 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    Ab Karte 1.10 (App 0.10.0) gibt es den dritten Kartentyp `custom:wand-training` für einen Trainingsplan: `art: heute` zeigt die nächste Einheit
    (aus `sensor.training_heute`, Option `entity`) mit animierter Strichfigur auf einer Wand-Ansicht, `art: plan` die Übungsliste. Die Übungen stehen
    in der Kartenkonfiguration (`einheiten`) einer Ansicht (Option `ansicht`, Standard `training`); die Heute-Karte liest sie von dort per `lovelace/config`.
+   Ab Karte 1.11 (App 0.11.0) hat `art: heute` ein Lauf-Aussehen (Zustand `L`): trocken bis, Stundenleiste bis Sonnenuntergang mit Regen-Balken und bestem
+   Fenster, nächste Einheit und Wetter morgen – aus einem Sensor mit Attribut `daten` (Option `wetter`, Standard `sensor.laufwetter`).
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.

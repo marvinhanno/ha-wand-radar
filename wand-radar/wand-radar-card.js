@@ -1,4 +1,4 @@
-// wand-radar 1.10 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.11 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -15,7 +15,7 @@
 // - Ansicht „Sport“ (seit 1.8): zweites Element custom:wand-sport (art: woche | letzte | jahr | monate | kalender | bestwerte) in derselben Datei.
 //   Liest nur sensor.strava_stats bzw. sensor.strava_latest_activity (hass.states), keine Abfrage, im HA-Kartenstil (ha-card, Theme-Variablen).
 // - Training (seit 1.10): drittes Element custom:wand-training (art: heute = Heute-Karte der Wand mit Strichfigur, art: plan = Übungsliste);
-//   liest sensor.training_heute, die Übungen (einheiten) stehen in der Kartenkonfiguration der Ansicht „training“.
+//   seit 1.11 mit Lauf-Aussehen (Laufwetter aus sensor.laufwetter: trocken bis, Stundenleiste, bestes Fenster, morgen); liest sensor.training_heute, die Übungen (einheiten) stehen in der Kartenkonfiguration der Ansicht „training“.
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
@@ -897,7 +897,7 @@ window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === 'wand-sport')) window.customCards.push({ type: 'wand-sport', name: 'Wand-Sport (Strava-Statistik)', description: 'Karten der Ansicht Sport' });
 
 // ---------- Training (custom:wand-training, seit 1.10) ----------
-// art: heute (Wand, linker Stapel: „Heute dran: A · Beine“ mit Mini-Figur) · plan (Unteransicht „Training“: Übungsliste je Einheit, bis die
+// art: heute (Wand, linker Stapel: „Heute dran: A · Beine“ mit Mini-Figur bzw. Lauf-Aussehen „Laufwetter heute“ mit Stundenleiste) · plan (Unteransicht „Training“: Übungsliste je Einheit, bis die
 // Ansicht ausgebaut ist). Daten: sensor.training_heute (Vorschlag-Motor in HA). Die Übungen stehen nur an EINER Stelle: in der Kartenkonfiguration
 // (`einheiten`) der Ansicht „training“; die Wand-Karte liest sie per Websocket (lovelace/config) von dort. Im Code stecken nur die Figuren.
 // Strichfiguren: Seitenansicht, Blick nach rechts, Boden y = 100; je Übung zwei Posen (a = Start, b = Umkehrpunkt), Animation a → b → a per SVG-SMIL.
@@ -1045,6 +1045,21 @@ const WT_CSS = `
 .zeile { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; }
 .zeile ha-icon { --mdc-icon-size: 18px; color: #a7acb4; flex: none; }
 .zeile small { color: #8b9099; font-size: 13px; }
+.sym.lauf { background: rgba(252,82,0,0.2); }
+.sym.lauf ha-icon { color: ${WT_LAUF}; }
+.u { display: flex !important; align-items: center; gap: 3px; }
+.tt .u .pl { display: inline-flex; flex: none; width: 18px; height: 18px; margin: 0; font-size: 10px; color: #7a7f87; border-radius: 6px; overflow: visible; }
+.u i { font-style: normal; margin: 0 2px; }
+.gross { display: flex; align-items: baseline; gap: 14px; margin-top: 8px; }
+.k.lauf .zeile { margin-top: 7px; }
+.gross b { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; white-space: nowrap; }
+.gross b small { font-size: 13px; font-weight: 500; color: #a7acb4; margin-left: 4px; letter-spacing: 0; }
+.leiste { display: flex; gap: 3px; margin-top: 8px; }
+.sd { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 10.5px; color: #8b9099; }
+.sd .t.g { color: #ffd0b8; }
+.bar { width: 100%; height: 28px; display: flex; align-items: flex-end; border-radius: 4px; background: rgba(255,255,255,0.04); overflow: hidden; }
+.bar.g { background: rgba(252,82,0,0.22); box-shadow: inset 0 0 0 1px rgba(252,82,0,0.55); }
+.bar div { width: 100%; background: #4fc3f7; border-radius: 3px; }
 `;
 // Pille für das Wochen-Soll (Status ok | faellig | offen), Farbe Lauf orange, sonst Kraft-Lila
 const wtPille = (t, st) => {
@@ -1052,17 +1067,26 @@ const wtPille = (t, st) => {
   const s = st === 'ok' ? `background:${f};color:#111` : st === 'faellig' ? `border:1.5px solid ${f};color:${f};background:none` : '';
   return `<span class="pl" style="${s}">${wrEsc(t)}</span>`;
 };
+const wtHeute = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; };
+// Kraft-Aussehen bei „heute kein trockenes Fenster“: wann es morgen trocken ist (nicht am Sonntag – dann beginnt eine neue Woche)
+const wtLaufMorgen = (lw) => {
+  const m = lw.morgen, wd = new Date().getDay();
+  if (!m || !m.n || m.nass >= m.n || wd === 0) return '';
+  const wann = !m.nass ? `trocken ab ${m.ab} Uhr` : m.regen_ab != null ? `trocken bis ${m.regen_ab} Uhr` : `trocken ab ${m.trocken_ab} Uhr`;
+  return `<div class="zeile"><ha-icon icon="mdi:run" style="color:${WT_LAUF}"></ha-icon><span>Lauf lieber ${wd === 6 ? 'Sonntag' : 'morgen'}<small> · ${wann}</small></span></div>`;
+};
 class WandTraining extends HTMLElement {
   setConfig(c) {
     if (!c || !c.art) throw new Error('art fehlt (heute, plan)');
-    this._cfg = Object.assign({ entity: 'sensor.training_heute', test: 'input_boolean.wand_training_heute_test', ansicht: 'training', ziel: '', weg: 'script.training_heute_nicht', animation: 60 }, c);
+    this._cfg = Object.assign({ entity: 'sensor.training_heute', wetter: 'sensor.laufwetter', test: 'input_boolean.wand_training_heute_test', ansicht: 'training', ziel: '', weg: 'script.training_heute_nicht', animation: 60 }, c);
     this._sig = null;
+    this._vollH = {};
   }
   getCardSize() { return this._cfg && this._cfg.art === 'plan' ? 8 : 3; }
   getGridOptions() { return { columns: 12, min_columns: 6 }; }
   set hass(h) {
     this._hass = h;
-    const c = this._cfg, e = h && h.states[c.entity], t = h && h.states[c.test];
+    const c = this._cfg, e = h && h.states[c.entity], t = h && h.states[c.test], w = h && h.states[c.wetter];
     if (c.art === 'heute' && !this._einh && !this._laedt) {
       this._laedt = true;
       const dash = c.dashboard || location.pathname.split('/')[1] || 'home-new';
@@ -1072,7 +1096,7 @@ class WandTraining extends HTMLElement {
       });
       laden();
     }
-    const sig = [e ? e.state : '', e ? e.last_updated : '', t ? t.state : '', !!this._einh, this._kompakt].join('|');
+    const sig = [e ? e.state : '', e ? e.last_updated : '', t ? t.state : '', w ? w.last_updated : '', !!this._einh, this._kompakt].join('|');
     if (sig === this._sig) return;
     this._sig = sig;
     this._render();
@@ -1097,6 +1121,10 @@ class WandTraining extends HTMLElement {
     const h = this._hass, c = this._cfg, e = h.states[c.entity], d = (e && e.attributes.daten) || {};
     const test = h.states[c.test] && h.states[c.test].state === 'on';
     const z = e ? e.state : '';
+    const wz = h.states[c.wetter], lw = (wz && wz.attributes.daten) || {};
+    const lwHeute = lw.datum === wtHeute();
+    if (z === 'L' || (test && d.aussehen === 'lauf')) { this._aussehen = 'lauf'; this._lauf(d, lwHeute ? lw : {}); this._nachRender(); return; }
+    this._aussehen = 'kraft';
     const einheit = ['A', 'B', 'C'].includes(z) ? z : (test ? (d.kraft || (d.rotation || [])[0] || 'A') : '');
     if (!einheit) { this.shadowRoot.innerHTML = ''; return; }
     const E = (this._einh || {})[einheit] || {}, name = E.name || '';
@@ -1111,6 +1139,7 @@ class WandTraining extends HTMLElement {
       const figId = (E.figur && WT_POSEN[E.figur]) ? E.figur : ((E.uebungen || []).map((u) => u.id).find((i) => WT_POSEN[i]) || '');
       const fig = figId ? wtFigur(figId, { groesse: 44 }) : `<ha-icon icon="${E.icon || 'mdi:dumbbell'}"></ha-icon>`;
       inhalt = (d.grund ? `<div class="grund"><ha-icon icon="mdi:information-outline"></ha-icon><span>${wrEsc(d.grund)}</span></div>` : '') +
+        (d.grund === 'heute kein trockenes Fenster' && lwHeute ? wtLaufMorgen(lw) : '') +
         (namen.length ? `<div class="ueb"><div class="fig">${fig}</div><div class="namen">${namen.map(wrEsc).join(' · ')}</div></div>` : '');
       if (d.modus === 'sommer') {
         inhalt += `<div class="soll">Woche ${(d.woche || []).map((w) => wtPille(w.st === 'ok' ? w.e || w.s : w.s, w.st)).join('')}</div>`;
@@ -1124,7 +1153,13 @@ class WandTraining extends HTMLElement {
       inhalt += `<div class="zeile"><ha-icon icon="mdi:watch"></ha-icon><span>Watch: Funktionales Krafttraining<small> · zählt von selbst</small></span></div>`;
     }
     this.shadowRoot.innerHTML = `<style>${WT_CSS}</style><div class="k${this._kompakt ? ' kompakt' : ''}" id="k">${kopf}${weg}${inhalt}</div>`;
+    this._nachRender();
+  }
+  // Tippen/✕, Figur nach einer Weile anhalten, Höhe für die Kompakt-Regel merken (für Kraft- und Lauf-Aussehen gleich)
+  _nachRender() {
+    const h = this._hass, c = this._cfg;
     const k = this.shadowRoot.getElementById('k');
+    if (!k) return;
     k.addEventListener('click', () => wtNavigieren(c.ziel || '/home-new/training'));
     this.shadowRoot.getElementById('weg').addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -1135,8 +1170,53 @@ class WandTraining extends HTMLElement {
     clearTimeout(this._still);
     const svg = this.shadowRoot.querySelector('.fig svg');
     if (svg && c.animation > 0) this._still = setTimeout(() => { try { svg.pauseAnimations(); } catch (x) { /* egal */ } }, c.animation * 1000);
-    if (!this._kompakt) requestAnimationFrame(() => { const hh = this.offsetHeight; if (hh > 60) this._vollH = hh; this._stapelPruefen(); });
+    const aus = this._aussehen;
+    if (!this._kompakt) requestAnimationFrame(() => { const hh = this.offsetHeight; if (hh > 60) this._vollH[aus] = hh; this._stapelPruefen(); });
     else requestAnimationFrame(() => this._stapelPruefen());
+  }
+  // ----- Lauf-Aussehen (Phase 3): Titel nach Modus, Wochen-Soll im Untertitel, „bis 13 Uhr trocken“, Stundenleiste bis Sonnenuntergang
+  // (Regen-Balken, bestes Fenster orange), Zeilen Bestes Fenster / Morgen: Einheit / Wetter morgen. lw = Daten von sensor.laufwetter (leer, wenn nicht von heute).
+  _lauf(d, lw) {
+    const c = this._cfg, wd = new Date().getDay(), winter = d.modus !== 'sommer';
+    const pillen = (d.woche || []).map((w) => wtPille(w.st === 'ok' ? w.e || w.s : w.s, w.st)).join('');
+    const unter = winter ? `${wd === 0 || wd === 6 ? 'Wochenende noch ohne Lauf<i>·</i>' : ''}Woche ${pillen}` : `Woche ${pillen}<i>·</i>${(d.laeufe || 0) + 1}. Lauf`;
+    const kopf = `<div class="kopf"><span class="sym lauf"><ha-icon icon="mdi:run"></ha-icon></span><div class="tt"><b>${winter ? 'Laufwetter heute' : 'Heute dran: Laufen'}</b><span class="u">${unter}</span></div></div>`;
+    const weg = `<div class="weg" id="weg" role="button" aria-label="Heute nicht">✕</div>`;
+    const st = lw.stunden || [], fen = lw.fenster;
+    let gross = '', klein = '';
+    if (lw.jetzt_trocken) { if (lw.trocken_bis != null) { gross = `bis ${lw.trocken_bis}`; klein = 'Uhr trocken'; } else { gross = `bis ${lw.sonne}`; klein = 'trocken und hell'; } }
+    else if (lw.trocken_ab != null) { gross = `ab ${lw.trocken_ab}`; klein = lw.trocken_bis != null ? `bis ${lw.trocken_bis} Uhr trocken` : 'Uhr trocken'; }
+    const temp = fen ? fen.t : (st[0] ? st[0][2] : null);
+    let inhalt;
+    if (this._kompakt) {
+      inhalt = `<div class="namen" style="margin-top:6px">${[gross ? `${gross} ${klein}` : '', temp != null ? `${temp}°` : '', fen ? `Fenster ${fen.von}–${fen.bis} Uhr` : ''].filter(Boolean).map(wrEsc).join(' · ')}</div>`;
+    } else {
+      inhalt = gross ? `<div class="gross"><b>${wrEsc(gross)}<small>${wrEsc(klein)}</small></b>${temp != null ? `<b>${temp}<small>°</small></b>` : ''}</div>` : '';
+      if (st.length) inhalt += `<div class="leiste">${st.map(([hh, mm, t, , nass]) => {
+        const gut = fen && hh >= fen.von && hh < fen.bis;
+        const hoehe = nass ? Math.max(14, Math.min(100, (mm / 1.6) * 100)) : 0;
+        return `<div class="sd"><span class="t${gut ? ' g' : ''}">${t}°</span><div class="bar${gut ? ' g' : ''}"><div style="height:${hoehe}%"></div></div><span>${hh}</span></div>`;
+      }).join('')}</div>`;
+      if (fen) inhalt += `<div class="zeile"><ha-icon icon="mdi:star-four-points-outline" style="color:${WT_LAUF}"></ha-icon><span>Am besten ${fen.von}–${fen.bis} Uhr<small> · ${fen.t}° · Wind ${fen.wind} km/h</small></span></div>`;
+      if (!lw.datum) inhalt += `<div class="zeile"><ha-icon icon="mdi:weather-cloudy-clock"></ha-icon><span>Laufwetter folgt</span></div>`;
+      const da = d.danach || {};
+      if (da.e) {
+        const E = (this._einh || {})[da.e] || {};
+        const mehr = E.dauer ? `${E.dauer} min` : '';
+        inhalt += `<div class="zeile"><ha-icon icon="mdi:dumbbell" style="color:${WT_KRAFT}"></ha-icon><span>${da.wann === 'heute' ? 'Sonst' : 'Morgen'}: ${da.e}${E.name ? ` · ${wrEsc(E.name)}` : ''}${mehr ? `<small> · ${wrEsc(mehr)}</small>` : ''}</span></div>`;
+      }
+      const m = lw.morgen;
+      if (m && m.n && wd !== 0) {
+        const tag = wd === 6 ? 'Sonntag' : 'Morgen', besser = lw.heute_ok ? '<small> · heute besser</small>' : '';
+        let t, icon = 'mdi:weather-rainy', farbe = '#4fc3f7';
+        if (!m.nass) { t = `${tag} trocken`; icon = 'mdi:weather-partly-cloudy'; farbe = '#a7acb4'; }
+        else if (m.regen_ab != null) t = `${tag} Regen ab ${m.regen_ab} Uhr${besser}`;
+        else if (m.trocken_ab != null) t = `${tag} erst ab ${m.trocken_ab} Uhr trocken${besser}`;
+        else t = `${tag} Regen${besser}`;
+        inhalt += `<div class="zeile"><ha-icon icon="${icon}" style="color:${farbe}"></ha-icon><span>${t}</span></div>`;
+      }
+    }
+    this.shadowRoot.innerHTML = `<style>${WT_CSS}</style><div class="k lauf${this._kompakt ? ' kompakt' : ''}" id="k">${kopf}${weg}${inhalt}</div>`;
   }
   // Platz im linken Wand-Stapel (vertical-stack mit max-height): reicht er nicht für die volle Karte, kompakt zeigen (nur Kopf + Übungszeile).
   // Gezählt werden alle anderen sichtbaren Karten des Stapels außer der letzten (Einkauf – die darf verschwinden).
@@ -1166,7 +1246,7 @@ class WandTraining extends HTMLElement {
     const gap = parseFloat(st.rowGap) || 10, kinder = [...s.root.children];
     let summe = 0;
     kinder.slice(0, -1).forEach((x) => { if (x !== s.ich && !s.ich.contains(x)) { const hh = x.offsetHeight; if (hh > 0) summe += hh + gap; } });
-    const kompakt = summe + (this._vollH || 235) > max;
+    const kompakt = summe + (this._vollH[this._aussehen] || (this._aussehen === 'lauf' ? 300 : 235)) > max;
     if (kompakt !== !!this._kompakt) { this._kompakt = kompakt; this._sig = null; this._render(); }
   }
 
