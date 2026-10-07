@@ -20,6 +20,11 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    in der Kartenkonfiguration (`einheiten`) einer Ansicht (Option `ansicht`, Standard `training`); die Heute-Karte liest sie von dort per `lovelace/config`.
    Ab Karte 1.11 (App 0.11.0) hat `art: heute` ein Lauf-Aussehen (Zustand `L`): trocken bis, Stundenleiste bis Sonnenuntergang mit Regen-Balken und bestem
    Fenster, nächste Einheit und Wetter morgen – aus einem Sensor mit Attribut `daten` (Option `wetter`, Standard `sensor.laufwetter`).
+   Ab Karte 1.12 (App 0.12.0) ersetzen `art: naechste`, `einheit` und `saison` das vorläufige `art: plan`: `naechste` (Umschalter Winter|Sommer, Kacheln A/B/C,
+   Wochen-Soll, Knöpfe für Start/Erledigt/Woche aussetzen, lange drücken = Korrektur – ruft `script.training_*` auf), `einheit` (trägt die `einheiten`;
+   Aufwärmen mit durchlaufendem Timer, Übungskarten mit Figur, Paare, Timer-Ring für Halteübungen, Pausenleiste; Timer über Zielzeitpunkt, Wake-Lock,
+   Ton per WebAudio) und `saison` (Soll/Ist je ISO-Woche aus `sensor.training_stand` und den Läufen in `sensor.strava_stats.liste`, Option `wochen`).
+   Figuren gibt es für alle Übungen der Einheiten A/B/C und das Aufwärmen.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.

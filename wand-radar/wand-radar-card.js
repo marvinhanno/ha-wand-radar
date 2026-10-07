@@ -1,4 +1,4 @@
-// wand-radar 1.11 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.12 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -14,8 +14,10 @@
 //   Umschalter dann „Training | Radar“. Keine Strava-Abfrage hier, nur hass.states.
 // - Ansicht „Sport“ (seit 1.8): zweites Element custom:wand-sport (art: woche | letzte | jahr | monate | kalender | bestwerte) in derselben Datei.
 //   Liest nur sensor.strava_stats bzw. sensor.strava_latest_activity (hass.states), keine Abfrage, im HA-Kartenstil (ha-card, Theme-Variablen).
-// - Training (seit 1.10): drittes Element custom:wand-training (art: heute = Heute-Karte der Wand mit Strichfigur, art: plan = Übungsliste);
+// - Training (seit 1.10): drittes Element custom:wand-training (art: heute = Heute-Karte der Wand mit Strichfigur);
 //   seit 1.11 mit Lauf-Aussehen (Laufwetter aus sensor.laufwetter: trocken bis, Stundenleiste, bestes Fenster, morgen); liest sensor.training_heute, die Übungen (einheiten) stehen in der Kartenkonfiguration der Ansicht „training“.
+//   seit 1.12 Ansicht „Training“: art: naechste (Winter|Sommer, A/B/C, Start/Erledigt/Woche aussetzen, Korrektur) · einheit (Aufwärmen, Übungen mit Figur, Timer, Pausenleiste) · saison;
+//   Figuren für alle Übungen von A/B/C und das Aufwärmen.
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
@@ -897,16 +899,21 @@ window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === 'wand-sport')) window.customCards.push({ type: 'wand-sport', name: 'Wand-Sport (Strava-Statistik)', description: 'Karten der Ansicht Sport' });
 
 // ---------- Training (custom:wand-training, seit 1.10) ----------
-// art: heute (Wand, linker Stapel: „Heute dran: A · Beine“ mit Mini-Figur bzw. Lauf-Aussehen „Laufwetter heute“ mit Stundenleiste) · plan (Unteransicht „Training“: Übungsliste je Einheit, bis die
-// Ansicht ausgebaut ist). Daten: sensor.training_heute (Vorschlag-Motor in HA). Die Übungen stehen nur an EINER Stelle: in der Kartenkonfiguration
-// (`einheiten`) der Ansicht „training“; die Wand-Karte liest sie per Websocket (lovelace/config) von dort. Im Code stecken nur die Figuren.
-// Strichfiguren: Seitenansicht, Blick nach rechts, Boden y = 100; je Übung zwei Posen (a = Start, b = Umkehrpunkt), Animation a → b → a per SVG-SMIL.
-// Posen über Gelenkpunkte (Hüfte, Rumpfrichtung, Fuß, Hand), Knie/Ellbogen rechnet wtIk() (aus plaene/training/figuren.mjs übernommen).
-const WT_KRAFT = '#ce93d8', WT_LAUF = '#fc5200';
+// art: heute (Wand, linker Stapel: „Heute dran: A · Beine“ mit Mini-Figur bzw. Lauf-Aussehen „Laufwetter heute“ mit Stundenleiste) ·
+// naechste (Unteransicht „Training“: Winter|Sommer, Kacheln A/B/C, Wochen-Soll, Start/Erledigt/Woche aussetzen) · einheit (Aufwärmen mit Timer,
+// Übungskarten mit Figur, Pausenleiste) · saison (Soll/Ist je ISO-Woche). Daten: sensor.training_heute (Vorschlag-Motor in HA),
+// sensor.training_stand (Einträge, Wochen), sensor.strava_stats.liste (Läufe). Die Übungen stehen nur an EINER Stelle: in der Kartenkonfiguration
+// (`einheiten`) der Karte art: einheit in der Ansicht „training“; Wand-Karte und art: naechste lesen sie per Websocket (lovelace/config) von dort.
+// Strichfiguren: Seitenansicht, Blick nach rechts, Boden y = 100; je Übung zwei oder mehr Posen (a = Start, b = Umkehrpunkt, optional `folge` für
+// mehr Stationen), Animation per SVG-SMIL. Posen über Gelenkpunkte (Hüfte, Rumpfrichtung, Fuß, Hand), Knie/Ellbogen rechnet wtIk()
+// (aus plaene/training/figuren.mjs übernommen). Zusätze: front (Vorderansicht, beide Seiten gleich hell), spiegel, bogen (Rücken rund/hohl),
+// kw (Kopfneigung), band ('haende' | 'fuesse' | [x, y] Anker → Hand).
+const WT_KRAFT = '#ce93d8', WT_LAUF = '#fc5200', WT_BAND = '#81c995';
 const WT_L = { ober: 23, unter: 23, rumpf: 30, kopf: 39, oa: 14, ua: 13, fuss: 7 };
 const wtAdd = (p, v, f = 1) => [p[0] + v[0] * f, p[1] + v[1] * f];
 const wtUnit = (v) => { const d = Math.hypot(v[0], v[1]) || 1; return [v[0] / d, v[1] / d]; };
 const wtGrad = (w) => (w * Math.PI) / 180;
+const wtDreh = (v, w) => { const c = Math.cos(wtGrad(w)), s = Math.sin(wtGrad(w)); return [v[0] * c - v[1] * s, v[0] * s + v[1] * c]; };
 function wtIk(A, C, l1, l2, knick) {          // Zwei-Gelenk-Kette A → C; knick -1 = Knie nach vorn, +1 = Ellbogen nach hinten
   const dx = C[0] - A[0], dy = C[1] - A[1];
   const d = Math.min(Math.hypot(dx, dy), l1 + l2 - 0.01);
@@ -917,27 +924,41 @@ function wtIk(A, C, l1, l2, knick) {          // Zwei-Gelenk-Kette A → C; knic
 function wtGelenke(p) {
   const hip = p.hip;
   const dir = p.sh ? wtUnit([p.sh[0] - hip[0], p.sh[1] - hip[1]]) : [Math.sin(wtGrad(p.t || 0)), -Math.cos(wtGrad(p.t || 0))];
-  const sh = wtAdd(hip, dir, WT_L.rumpf), kopf = wtAdd(hip, dir, WT_L.kopf);
+  const sh = wtAdd(hip, dir, WT_L.rumpf);
+  const mitte = wtAdd(wtAdd(hip, dir, WT_L.rumpf / 2), [dir[1], -dir[0]], p.bogen || 0);      // bogen > 0: Rücken nach oben/hinten gewölbt
+  const kopf = wtAdd(sh, p.kw ? wtDreh(dir, p.kw) : dir, WT_L.kopf - WT_L.rumpf);
   const beine = p.beine.map((b) => {
     const knie = wtIk(hip, b.fuss, WT_L.ober, WT_L.unter, b.knick ?? -1);
     const zeh = b.zeh || wtAdd(b.fuss, [Math.cos(wtGrad(b.zw || 0)), Math.sin(wtGrad(b.zw || 0))], WT_L.fuss);
     return [hip, knie, b.fuss, zeh];
   });
   const arme = p.arme.map((a) => [sh, wtIk(sh, a.hand, WT_L.oa, WT_L.ua, a.knick ?? 1), a.hand]);
-  return { kopf, beine, arme, rumpf: [hip, sh], hanteln: p.arme.filter((a) => a.hantel).map((a) => a.hand), hantelHuefte: p.hantelHuefte ? hip : null };
+  return { kopf, beine, arme, rumpf: [hip, mitte, sh], hanteln: p.arme.filter((a) => a.hantel).map((a) => a.hand), hantelHuefte: p.hantelHuefte ? hip : null };
 }
 const wtD = (pts) => pts.map((q, i) => `${i ? 'L' : 'M'}${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join(' ');
-const wtAnim = (attr, a, b, dur) => (a === b ? '' :
-  `<animate attributeName="${attr}" values="${a};${b};${a}" dur="${dur}s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45 0 0.55 1;0.45 0 0.55 1"/>`);
+// Werte einer Folge von Posen (zurück zur ersten); jede Strecke dauert dur/2 Sekunden
+const wtAnim = (attr, werte, dur) => {
+  if (werte.every((w) => w === werte[0])) return '';
+  const v = [...werte, werte[0]], n = v.length - 1;
+  return `<animate attributeName="${attr}" values="${v.join(';')}" dur="${(dur * n) / 2}s" repeatCount="indefinite" calcMode="spline" ` +
+    `keyTimes="${v.map((_, i) => +(i / n).toFixed(4)).join(';')}" keySplines="${Array(n).fill('0.45 0 0.55 1').join(';')}"/>`;
+};
 const WT_STUFE_FARBE = 'fill="#2a2d33" stroke="#5f6368" stroke-width="1.2"';
 const WT_COUCH = (x0, x1, y) => `<rect x="${x0}" y="${y - 20}" width="8" height="${120 - y}" rx="3" ${WT_STUFE_FARBE}/><rect x="${x0}" y="${y}" width="${x1 - x0}" height="${100 - y - 4}" rx="3" fill="#30333a" stroke="#5f6368" stroke-width="1.2"/><line x1="${x0 + 3}" y1="96" x2="${x0 + 3}" y2="100" stroke="#5f6368" stroke-width="2"/><line x1="${x1 - 3}" y1="96" x2="${x1 - 3}" y2="100" stroke="#5f6368" stroke-width="2"/>`;
+const WT_COUCH_R = (x0, x1, y) => `<rect x="${x1 - 8}" y="${y - 20}" width="8" height="${120 - y}" rx="3" ${WT_STUFE_FARBE}/><rect x="${x0}" y="${y}" width="${x1 - x0}" height="${100 - y - 4}" rx="3" fill="#30333a" stroke="#5f6368" stroke-width="1.2"/><line x1="${x0 + 3}" y1="96" x2="${x0 + 3}" y2="100" stroke="#5f6368" stroke-width="2"/><line x1="${x1 - 3}" y1="96" x2="${x1 - 3}" y2="100" stroke="#5f6368" stroke-width="2"/>`;
 const WT_TREPPE = (stufen, richtung = 'links') => `<path d="${richtung === 'links'
   ? `M${stufen[0][1]} 100 ` + stufen.map(([y, , x0]) => `V${y} H${x0}`).join(' ') + ' V100 Z'
   : `M${stufen[0][1]} 100 ` + stufen.map(([y, , x1]) => `V${y} H${x1}`).join(' ') + ' V100 Z'}" ${WT_STUFE_FARBE} stroke-linejoin="round"/>`;
 const WT_GELAENDER = (x0, y0, x1, y1) => `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="#9aa0a6" stroke-width="2.2" stroke-linecap="round"/>`;
 const WT_WAND = (x) => `<rect x="${x - 6}" y="-12" width="6" height="112.5" fill="#24272c"/><line x1="${x}" y1="-12" x2="${x}" y2="100.5" stroke="#5f6368" stroke-width="1.5"/>`;
-// Posen je Übungs-ID (Phase 4 ergänzt B, C und das Aufwärmen)
+const WT_PFOSTEN = (x, y) => `<line x1="${x}" y1="4" x2="${x}" y2="100" stroke="#5f6368" stroke-width="3" stroke-linecap="round"/><circle cx="${x}" cy="${y}" r="2.4" fill="#9aa0a6"/>`;
+// Gemeinsame Posen
+const WT_STEHEN = { hip: [50, 51], t: 0, beine: [{ fuss: [52, 96.5] }, { fuss: [48, 96.5] }] };
+const wtVier = (o = {}) => Object.assign({ hip: [42, 73], sh: [72, 73], beine: [{ fuss: [19, 96.5], zw: 180 }, { fuss: [17, 96.5], zw: 180 }], arme: [{ hand: [73, 99] }, { hand: [71, 99] }] }, o);   // Vierfüßlerstand
+const wtSeit = (o = {}) => Object.assign({ hip: [45, 89.5], sh: [75, 84.5], beine: [{ fuss: [1, 96], zw: -75 }, { fuss: [-1, 98], zw: -75 }], arme: [{ hand: [74, 58] }, { hand: [88, 98.5] }] }, o);   // Seitstütz
+// Posen je Übungs-ID (A, B, C und Aufwärmen; Figurenblatt: werkzeuge/training/figurenblatt.mjs im HA-Repo)
 const WT_POSEN = {
+  // ----- A · Beine -----
   bss: {
     props: WT_COUCH(-6, 28, 76),
     a: { hip: [52, 56], t: 8, beine: [{ fuss: [62, 96.5] }, { fuss: [24, 72.5], zw: 172 }], arme: [{ hand: [57, 52], hantel: 1 }, { hand: [55, 52], hantel: 1 }] },
@@ -957,39 +978,157 @@ const WT_POSEN = {
     a: { hip: [52, 79], sh: [24, 92], beine: [{ fuss: [74, 96.5], zw: 0 }, { fuss: [91, 58], zw: -60, knick: -1 }], arme: [{ hand: [46, 98], knick: -1 }, { hand: [44, 98], knick: -1 }], hantelHuefte: 0 },
     b: { hip: [48, 92], sh: [18, 93], beine: [{ fuss: [74, 96.5], zw: 0 }, { fuss: [88, 74], zw: -45, knick: -1 }], arme: [{ hand: [42, 98], knick: -1 }, { hand: [40, 98], knick: -1 }], hantelHuefte: 0 },
   },
-  wallsit: {
-    dur: 2.4,
-    props: WT_WAND(18),
-    a: { hip: [26, 70], t: -2, beine: [{ fuss: [50, 92], zeh: [56, 98] }, { fuss: [48, 92], zeh: [54, 98] }], arme: [{ hand: [42, 67] }, { hand: [40, 67] }] },
-    b: { hip: [26, 70], t: -2, beine: [{ fuss: [50, 90], zeh: [56, 98] }, { fuss: [48, 90], zeh: [54, 98] }], arme: [{ hand: [42, 67] }, { hand: [40, 67] }] },
-  },
   waden: {
     dur: 2.6,
     props: WT_TREPPE([[86, 55, 76], [72, 76, 106]], 'rechts') + WT_GELAENDER(64, 38, 106, 16),
     a: { hip: [52, 43], t: 0, beine: [{ fuss: [51, 88.5], zeh: [58, 86] }, { fuss: [38, 68], knick: -1 }], arme: [{ hand: [84, 27] }, { hand: [55, 69], hantel: 1 }] },
     b: { hip: [53, 33], t: 0, beine: [{ fuss: [53, 78], zeh: [58, 86] }, { fuss: [39, 58], knick: -1 }], arme: [{ hand: [84, 27] }, { hand: [56, 59], hantel: 1 }] },
   },
+  // ----- Aufwärmen -----
+  hampelmann: {
+    dur: 1.4, front: 1,
+    a: { hip: [50, 51], t: 0, beine: [{ fuss: [55, 96.5], zw: 15 }, { fuss: [45, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [55, 47.5], knick: -1 }, { hand: [45, 47.5] }] },
+    b: { hip: [50, 53], t: 0, beine: [{ fuss: [64, 96.5], zw: 15 }, { fuss: [36, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [63, 0] }, { hand: [37, 0], knick: -1 }] },
+  },
+  beinschwingen: {
+    dur: 1.8,
+    props: WT_GELAENDER(58, 41, 106, 17),
+    a: { hip: [44, 51], t: -4, beine: [{ fuss: [78, 76], zw: -50 }, { fuss: [44, 96.5] }], arme: [{ hand: [64, 38] }, { hand: [42, 47] }] },
+    b: { hip: [44, 51], t: 6, beine: [{ fuss: [14, 84], zw: 110 }, { fuss: [44, 96.5] }], arme: [{ hand: [64, 38] }, { hand: [44, 47] }] },
+  },
+  beinschwingen_seitlich: {
+    dur: 1.8, front: 1,
+    props: WT_WAND(14),
+    a: { hip: [42, 51], t: 0, beine: [{ fuss: [68, 82], zw: 30 }, { fuss: [38, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [50, 46], knick: -1 }, { hand: [17, 28], knick: -1 }] },
+    b: { hip: [42, 51], t: 0, beine: [{ fuss: [28, 90], zw: 170, knick: 1 }, { fuss: [38, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [50, 46], knick: -1 }, { hand: [17, 28], knick: -1 }] },
+  },
+  kniebeuge: {
+    dur: 2.6,
+    a: { hip: [48, 51], t: 0, beine: [{ fuss: [52, 96.5] }, { fuss: [49, 96.5] }], arme: [{ hand: [51, 47] }, { hand: [49, 47] }] },
+    b: { hip: [34, 74], t: 32, beine: [{ fuss: [52, 96.5] }, { fuss: [49, 96.5] }], arme: [{ hand: [76, 47] }, { hand: [74, 47] }] },
+  },
+  ausfallschritt_drehung: {
+    dur: 3,
+    a: { hip: [46, 51], t: 0, beine: [{ fuss: [50, 96.5] }, { fuss: [46, 96.5] }], arme: [{ hand: [58, 36] }, { hand: [56, 36] }] },
+    b: { hip: [42, 72], t: 4, beine: [{ fuss: [60, 96.5] }, { fuss: [20, 94], zw: 45 }], arme: [{ hand: [66, 44] }, { hand: [22, 46], knick: -1 }] },
+  },
+  armkreisen: {
+    dur: 1.4, folge: ['a', 'm', 'b', 'n'],
+    a: { ...WT_STEHEN, arme: [{ hand: [52, -5] }, { hand: [50, -5] }] },
+    m: { ...WT_STEHEN, arme: [{ hand: [76, 22] }, { hand: [74, 22] }] },
+    b: { ...WT_STEHEN, arme: [{ hand: [52, 47] }, { hand: [50, 47] }] },
+    n: { ...WT_STEHEN, arme: [{ hand: [24, 20], knick: -1 }, { hand: [26, 20], knick: -1 }] },
+  },
+  dislocates: {
+    dur: 2.4, folge: ['a', 'm', 'b', 'm'],
+    a: { ...WT_STEHEN, arme: [{ hand: [76, 26], knick: -1 }, { hand: [74, 26], knick: -1 }] },
+    m: { ...WT_STEHEN, arme: [{ hand: [53, -5] }, { hand: [51, -5] }] },
+    b: { ...WT_STEHEN, arme: [{ hand: [26, 30], knick: -1 }, { hand: [28, 30], knick: -1 }] },
+  },
+  katze_kuh: {
+    dur: 3.6,
+    a: wtVier({ hip: [42, 72], sh: [72, 74], bogen: 7, kw: 50 }),
+    b: wtVier({ hip: [42, 74], sh: [72, 72], bogen: -6, kw: -30 }),
+  },
+  liegestuetz_couch: {
+    dur: 2.4,
+    props: WT_COUCH_R(56, 104, 78),
+    a: { hip: [44.2, 67.4], sh: [68, 51.5], beine: [{ fuss: [6, 93], zeh: [12, 99] }, { fuss: [4, 93], zeh: [10, 99] }], arme: [{ hand: [70, 78] }, { hand: [68, 78] }] },
+    b: { hip: [48, 74.2], sh: [75.4, 62], beine: [{ fuss: [6, 93], zeh: [12, 99] }, { fuss: [4, 93], zeh: [10, 99] }], arme: [{ hand: [70, 78] }, { hand: [68, 78] }] },
+  },
+  // ----- B · Oberkörper + Rumpf -----
+  liegestuetz: {
+    dur: 2.4,
+    a: { hip: [48, 80.6], sh: [76, 72], beine: [{ fuss: [4, 94], zeh: [10, 99.5] }, { fuss: [2, 94], zeh: [8, 99.5] }], arme: [{ hand: [76, 98.5] }, { hand: [74, 98.5] }] },
+    b: { hip: [49.7, 89.2], sh: [79.6, 86], beine: [{ fuss: [4, 94], zeh: [10, 99.5] }, { fuss: [2, 94], zeh: [8, 99.5] }], arme: [{ hand: [76, 98.5] }, { hand: [74, 98.5] }] },
+  },
+  rudern: {
+    dur: 2.6,
+    props: WT_COUCH(-4, 84, 76),
+    a: { hip: [38, 53], sh: [68, 53], beine: [{ fuss: [15, 76], zw: 180 }, { fuss: [30, 96.5] }], arme: [{ hand: [66, 79], hantel: 1 }, { hand: [69, 76] }] },
+    b: { hip: [38, 53], sh: [68, 52], beine: [{ fuss: [15, 76], zw: 180 }, { fuss: [30, 96.5] }], arme: [{ hand: [54, 58], hantel: 1 }, { hand: [69, 76] }] },
+  },
+  schulterdruecken: {
+    dur: 2.4,
+    a: { ...WT_STEHEN, arme: [{ hand: [58, 20], hantel: 1 }, { hand: [56, 20], hantel: 1 }] },
+    b: { ...WT_STEHEN, arme: [{ hand: [53, -5], hantel: 1 }, { hand: [51, -5], hantel: 1 }] },
+  },
+  pull_apart: {
+    dur: 2.4, front: 1, band: 'haende',
+    a: { hip: [50, 51], t: 0, beine: [{ fuss: [55, 96.5], zw: 15 }, { fuss: [45, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [54, 38], knick: -1 }, { hand: [46, 38] }] },
+    b: { hip: [50, 51], t: 0, beine: [{ fuss: [55, 96.5], zw: 15 }, { fuss: [45, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [76, 22], knick: -1 }, { hand: [24, 22] }] },
+  },
+  dead_bug: {
+    dur: 3,
+    a: { hip: [58, 92], sh: [28, 92], beine: [{ fuss: [81, 69], zw: -80 }, { fuss: [79, 70], zw: -80 }], arme: [{ hand: [28, 66] }, { hand: [30, 66] }] },
+    b: { hip: [58, 92], sh: [28, 92], beine: [{ fuss: [81, 69], zw: -80 }, { fuss: [101, 87], zw: -80 }], arme: [{ hand: [2, 86] }, { hand: [30, 66] }] },
+  },
+  pallof: {
+    dur: 3, band: [0, 32],
+    props: WT_PFOSTEN(0, 32),
+    a: { hip: [46, 51], t: 0, beine: [{ fuss: [50, 96.5] }, { fuss: [44, 96.5] }], arme: [{ hand: [56, 33] }, { hand: [54, 33] }] },
+    b: { hip: [46, 51], t: 0, beine: [{ fuss: [50, 96.5] }, { fuss: [44, 96.5] }], arme: [{ hand: [71, 29] }, { hand: [69, 29] }] },
+  },
+  // ----- C · Stabi -----
+  unterarmstuetz: {
+    dur: 3,
+    a: { hip: [46, 88], sh: [75, 84], beine: [{ fuss: [1, 94], zeh: [6, 99.5] }, { fuss: [-1, 94], zeh: [4, 99.5] }], arme: [{ hand: [89, 98] }, { hand: [87, 98] }] },
+    b: { hip: [46, 86.5], sh: [75, 84], beine: [{ fuss: [1, 94], zeh: [6, 99.5] }, { fuss: [-1, 94], zeh: [4, 99.5] }], arme: [{ hand: [89, 98] }, { hand: [87, 98] }] },
+  },
+  seitstuetz_l: { dur: 3, a: wtSeit(), b: wtSeit({ hip: [45, 87.5] }) },
+  seitstuetz_r: { dur: 3, spiegel: 1, a: wtSeit(), b: wtSeit({ hip: [45, 87.5] }) },
+  bird_dog: {
+    dur: 3.2,
+    a: wtVier(),
+    b: wtVier({ beine: [{ fuss: [19, 96.5], zw: 180 }, { fuss: [-2, 70], zw: 180 }], arme: [{ hand: [98, 69] }, { hand: [71, 99] }] }),
+  },
+  wallsit: {
+    dur: 2.4,
+    props: WT_WAND(18),
+    a: { hip: [26, 70], t: -2, beine: [{ fuss: [50, 92], zeh: [56, 98] }, { fuss: [48, 92], zeh: [54, 98] }], arme: [{ hand: [42, 67] }, { hand: [40, 67] }] },
+    b: { hip: [26, 70], t: -2, beine: [{ fuss: [50, 90], zeh: [56, 98] }, { fuss: [48, 90], zeh: [54, 98] }], arme: [{ hand: [42, 67] }, { hand: [40, 67] }] },
+  },
+  monster_walk: {
+    dur: 2, front: 1, band: 'fuesse',
+    a: { hip: [50, 58], t: 0, beine: [{ fuss: [61, 96.5], zw: 15 }, { fuss: [39, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [58, 48], knick: -1 }, { hand: [42, 48] }] },
+    b: { hip: [46, 58], t: 0, beine: [{ fuss: [61, 96.5], zw: 15 }, { fuss: [30, 96.5], zw: 165, knick: 1 }], arme: [{ hand: [54, 48], knick: -1 }, { hand: [38, 48] }] },
+  },
+  hollow: {
+    dur: 3,
+    a: { hip: [50, 95], sh: [22, 88], beine: [{ fuss: [94, 86], zw: -80 }, { fuss: [93, 87.5], zw: -80 }], arme: [{ hand: [-3, 81] }, { hand: [-1, 82] }] },
+    b: { hip: [50, 95], sh: [22, 86], beine: [{ fuss: [94, 83], zw: -80 }, { fuss: [93, 84.5], zw: -80 }], arme: [{ hand: [-3, 78] }, { hand: [-1, 79] }] },
+  },
+  copenhagen: {
+    dur: 3,
+    props: WT_COUCH(-6, 26, 74),
+    a: { hip: [45.4, 79.6], sh: [75, 84.5], beine: [{ fuss: [0, 72], zw: -75 }, { fuss: [36, 98], zw: 0 }], arme: [{ hand: [52, 72] }, { hand: [88, 98.5] }] },
+    b: { hip: [45.4, 76], sh: [75, 84.5], beine: [{ fuss: [0, 72], zw: -75 }, { fuss: [30, 84], zw: 0 }], arme: [{ hand: [52, 70] }, { hand: [88, 98.5] }] },
+  },
 };
-// Figur als SVG-Text: wtFigur(id, { groesse, farbe, still: 'a'|'b' }); leer, wenn es für die Übung (noch) keine Posen gibt
+// Figur als SVG-Text: wtFigur(id, { groesse, farbe, still: 'a'|'b' }); leer, wenn es für die Übung keine Posen gibt
 function wtFigur(id, o = {}) {
   const u = WT_POSEN[id]; if (!u) return '';
-  const farbe = o.farbe || WT_KRAFT, fern = o.fern || '#7d5f86', dur = u.dur || 3;
-  const A = wtGelenke(u.a), B = wtGelenke(o.still ? (o.still === 'b' ? u.b : u.a) : u.b);
-  const P = o.still === 'b' ? B : A;
-  const linie = (pa, pb, c, w) => `<path d="${wtD(pa)}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${o.still ? '' : wtAnim('d', wtD(pa), wtD(pb), dur)}</path>`;
-  const kreis = (pa, pb, r, attrs) => `<circle cx="${pa[0].toFixed(1)}" cy="${pa[1].toFixed(1)}" r="${r}" ${attrs}>${o.still ? '' : wtAnim('cx', pa[0].toFixed(1), pb[0].toFixed(1), dur) + wtAnim('cy', pa[1].toFixed(1), pb[1].toFixed(1), dur)}</circle>`;
-  const hantel = (pa, pb) => kreis(pa, pb, 3.4, 'fill="#3a3d44" stroke="#9aa0a6" stroke-width="1.4"');
-  const g = (X, Y) => [
-    linie(X.beine[1], Y.beine[1], fern, 4.2), linie(X.arme[1], Y.arme[1], fern, 3.6),
-    linie(X.rumpf, Y.rumpf, farbe, 5), kreis(X.kopf, Y.kopf, 6.2, `fill="${farbe}"`),
-    linie(X.beine[0], Y.beine[0], farbe, 4.6), linie(X.arme[0], Y.arme[0], farbe, 4),
-    ...X.hanteln.map((h, k) => hantel(h, Y.hanteln[k])),
-    X.hantelHuefte ? hantel(wtAdd(X.hantelHuefte, [0, -5]), wtAdd(Y.hantelHuefte, [0, -5])) : '',
+  const farbe = o.farbe || WT_KRAFT, fern = u.front ? farbe : (o.fern || '#7d5f86'), dur = u.dur || 3;
+  const G = (o.still ? [u[o.still] ? o.still : 'a'] : (u.folge || ['a', 'b'])).map((k) => wtGelenke(u[k]));
+  const an = (attr, werte) => (o.still ? '' : wtAnim(attr, werte, dur));
+  const z = (n) => n.toFixed(1);
+  const linie = (f, c, w) => { const v = G.map((g) => wtD(f(g))); return `<path d="${v[0]}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${an('d', v)}</path>`; };
+  const kreis = (f, r, attrs) => { const v = G.map(f); return `<circle cx="${z(v[0][0])}" cy="${z(v[0][1])}" r="${r}" ${attrs}>${an('cx', v.map((p) => z(p[0])))}${an('cy', v.map((p) => z(p[1])))}</circle>`; };
+  const hantel = (f) => kreis(f, 3.4, 'fill="#3a3d44" stroke="#9aa0a6" stroke-width="1.4"');
+  const band = !u.band ? '' : linie((g) => (u.band === 'haende' ? [g.arme[0][2], g.arme[1][2]] : u.band === 'fuesse' ? [g.beine[0][2], g.beine[1][2]] : [u.band, g.arme[0][2]]), WT_BAND, 1.8);
+  const X = G[0];
+  const figur = [
+    linie((g) => g.beine[1], fern, 4.2), linie((g) => g.arme[1], fern, 3.6),
+    linie((g) => g.rumpf, farbe, 5), kreis((g) => g.kopf, 6.2, `fill="${farbe}"`),
+    linie((g) => g.beine[0], farbe, 4.6), linie((g) => g.arme[0], farbe, 4), band,
+    ...X.hanteln.map((_, k) => hantel((g) => g.hanteln[k])),
+    X.hantelHuefte ? hantel((g) => wtAdd(g.hantelHuefte, [0, -5])) : '',
   ].join('');
   const s = o.groesse || 96;
   return `<svg viewBox="-6 -14 112 118" width="${s}" height="${(s * 118 / 112).toFixed(1)}" style="display:block;overflow:visible">` +
-    `<line x1="-4" y1="100.5" x2="104" y2="100.5" stroke="#3c4043" stroke-width="1.5"/>${u.props || ''}${o.still ? g(P, P) : g(A, B)}</svg>`;
+    `<line x1="-4" y1="100.5" x2="104" y2="100.5" stroke="#3c4043" stroke-width="1.5"/>${u.spiegel ? `<g transform="translate(100 0) scale(-1 1)">${u.props || ''}${figur}</g>` : `${u.props || ''}${figur}`}</svg>`;
 }
+window.wandTrainingFiguren = { posen: WT_POSEN, figur: wtFigur };      // für das Figurenblatt (Werkzeug im HA-Repo)
 // Einheiten aus der Konfiguration der Ansicht „training“ (eine Quelle; Storage-Dashboards kennen keine YAML-Anker). Je Seite einmal geladen,
 // nach 1 h neu (Änderungen am Dashboard laden die Seite ohnehin neu).
 const wtQuelle = {};
@@ -1075,19 +1214,264 @@ const wtLaufMorgen = (lw) => {
   const wann = !m.nass ? `trocken ab ${m.ab} Uhr` : m.regen_ab != null ? `trocken bis ${m.regen_ab} Uhr` : `trocken ab ${m.trocken_ab} Uhr`;
   return `<div class="zeile"><ha-icon icon="mdi:run" style="color:${WT_LAUF}"></ha-icon><span>Lauf lieber ${wd === 6 ? 'Sonntag' : 'morgen'}<small> · ${wann}</small></span></div>`;
 };
+// ----- Ansicht „Training“ (seit 1.12): gemeinsame Auswahl, Datum/ISO-Woche, Timer, Ton, Wake-Lock, Rückfragen -----
+const WT_ARTEN = ['heute', 'naechste', 'einheit', 'saison'];
+const wtWahl = { e: '' };                     // in der Ansicht angetippte Einheit (leer = Vorschlag des Motors); gilt für naechste + einheit
+const wtWaehlen = (e) => { wtWahl.e = e; window.dispatchEvent(new CustomEvent('wand-training-wahl')); };
+const wtVorschlag = (z, d) => (['A', 'B', 'C'].includes(z) ? z : d.kraft || (d.rotation || [])[0] || 'A');
+const wtTagText = (iso) => { const q = wsTeile(wsTag(String(iso).slice(0, 10))); return `${WS_WTAG[q.w]} ${q.t}.${q.m}.`; };
+const wtMontag = (n) => n - ((wsTeile(n).w + 6) % 7);
+const wtKw = (n) => {                         // Tageszähler → 'JJJJ-WW' (ISO-Woche, Jahr des Donnerstags)
+  const don = wtMontag(n) + 3, j = wsTeile(don).j, erst = wtMontag(wsTag(`${j}-01-04`)) + 3;
+  return `${j}-${pad(1 + Math.round((don - erst) / 7))}`;
+};
+const WT_QUELLE = { watch: 'Watch', start: 'Watch nach Start-Knopf', manuell: 'ohne Watch eingetragen', dauer: 'Watch (nach Dauer)', vorschlag: 'Watch (Vorschlag)', rotation: 'Watch (Rotation)' };
+const wtMs = (s) => { const x = Math.max(0, Math.ceil(s - 0.001)); return `${Math.floor(x / 60)}:${pad(x % 60)}`; };
+const wtToast = (el, message) => el.dispatchEvent(new CustomEvent('hass-notification', { detail: { message }, bubbles: true, composed: true }));
+// Soll/Ist einer Woche aus erledigten Einheiten (A/B/C) und Läufen – wie der Motor (Sommer: K = A oder B)
+function wtSollIst(m, es, l) {
+  const n = { A: 0, B: 0, C: 0 }; es.forEach((e) => { if (n[e] !== undefined) n[e]++; });
+  let rest = l;
+  const platz = (s) => {
+    if (s === 'L') { if (rest > 0) { rest--; return { s, e: 'L', st: 'ok' }; } return { s, e: 'L', st: 'offen' }; }
+    if (s === 'K') { const e = n.A ? 'A' : n.B ? 'B' : ''; if (e) { n[e]--; return { s, e, st: 'ok' }; } return { s, e: '', st: 'offen' }; }
+    if (n[s]) { n[s]--; return { s, e: s, st: 'ok' }; }
+    return { s, e: s, st: 'offen' };
+  };
+  const woche = (m === 'sommer' ? ['L', 'L', 'K', 'C'] : ['A', 'B', 'C', 'L']).map(platz);
+  return { woche, extra: { L: rest, K: n.A + n.B + n.C } };
+}
+// Rückfrage als eigene Ebene in document.body (Theme-Variablen von HA liegen auf <html>). knoepfe: [{ t, f, haupt, warn }]
+function wtFrage(titel, text, knoepfe) {
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:16px;font-family:var(--ha-font-family-body, Roboto, -apple-system, sans-serif)';
+  const k = knoepfe.map((b, i) => `<button data-i="${i}" style="min-height:44px;padding:0 18px;border-radius:22px;font-size:15px;font-weight:600;font-family:inherit;cursor:pointer;${b.haupt
+    ? 'background:#ce93d8;color:#2a0f33;border:none' : b.warn ? 'background:none;color:var(--error-color,#ef5350);border:1px solid var(--divider-color,rgba(127,127,127,.3))'
+    : 'background:none;color:var(--primary-text-color);border:1px solid var(--divider-color,rgba(127,127,127,.3))'}">${wrEsc(b.t)}</button>`).join('');
+  ov.innerHTML = `<div style="background:var(--card-background-color,#1c1c1c);color:var(--primary-text-color,#e1e1e1);border-radius:20px;width:100%;max-width:360px;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.45)">
+    <div style="font-size:18px;font-weight:700">${wrEsc(titel)}</div>${text ? `<div style="font-size:14px;line-height:1.45;color:var(--secondary-text-color,#9b9b9b);margin-top:8px">${wrEsc(text)}</div>` : ''}
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:18px">${k}</div></div>`;
+  const zu = () => ov.remove();
+  ov.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (b) { zu(); const f = knoepfe[+b.dataset.i].f; if (f) f(); } else if (ev.target === ov) zu();
+  });
+  document.body.appendChild(ov);
+}
+// Timer: Schritte [{ s, seite, u }] nacheinander; Zeit über Zielzeitpunkt (ziel, ms), angehalten über rest (s) – iOS drosselt Hintergrund-Tabs.
+// art 'auf' (Aufwärmen, läuft durch), 'ueb' (ein Satz, danach satz + 1 bis saetze), 'pause' (Pausenleiste). Nichts wird gespeichert.
+const WT_UHR = { t: {}, karten: new Set(), iv: 0, lock: null };
+const WT_TON = { ctx: null };
+const wtIos = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function wtTonAn() {                          // nur aus einem Tipp heraus: WebAudio freischalten
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    if (!WT_TON.ctx) WT_TON.ctx = new AC();
+    if (WT_TON.ctx.state !== 'running') WT_TON.ctx.resume();
+    const s = WT_TON.ctx.createBufferSource(); s.buffer = WT_TON.ctx.createBuffer(1, 1, 22050); s.connect(WT_TON.ctx.destination); s.start(0);
+  } catch (x) { /* kein Ton */ }
+}
+function wtPiep(lang) {
+  const c = WT_TON.ctx; if (!c || c.state !== 'running') return;
+  try {
+    const o = c.createOscillator(), g = c.createGain(), t = c.currentTime, d = lang ? 0.5 : 0.13;
+    o.type = 'sine'; o.frequency.value = lang ? 1175 : 880;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.6, t + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + d + 0.03);
+  } catch (x) { /* egal */ }
+}
+const wtTonOk = () => !!(WT_TON.ctx && WT_TON.ctx.state === 'running');
+async function wtWach(an) {                   // Bildschirm wach halten, solange ein Timer läuft
+  try {
+    if (an && !WT_UHR.lock && navigator.wakeLock) {
+      const l = await navigator.wakeLock.request('screen'); WT_UHR.lock = l;
+      l.addEventListener('release', () => { if (WT_UHR.lock === l) WT_UHR.lock = null; });
+    } else if (!an && WT_UHR.lock) { const l = WT_UHR.lock; WT_UHR.lock = null; await l.release(); }
+  } catch (x) { WT_UHR.lock = null; }
+}
+const wtUhrLaeuft = () => Object.values(WT_UHR.t).some((t) => t.ziel);
+function wtUhrNeu(key, def) {
+  WT_UHR.t[key] = Object.assign({ i: 0, satz: 0, saetze: 1, ziel: 0, fertig: false, piep: null }, def);
+  WT_UHR.t[key].rest = WT_UHR.t[key].schritte[WT_UHR.t[key].i].s;
+  return WT_UHR.t[key];
+}
+function wtUhrStartStop(key) {
+  const t = WT_UHR.t[key]; if (!t) return;
+  if (t.ziel) { t.rest = Math.max(0, (t.ziel - Date.now()) / 1000); t.ziel = 0; }
+  else {
+    if (t.fertig) { t.fertig = false; t.satz = 0; t.i = 0; t.rest = t.schritte[0].s; }
+    t.ziel = Date.now() + t.rest * 1000; t.piep = null;
+  }
+  wtUhrTick();
+}
+function wtUhrSpringen(key, i) {
+  const t = WT_UHR.t[key]; if (!t || !t.schritte[i]) return;
+  t.i = i; t.rest = t.schritte[i].s; t.fertig = false; t.piep = null;
+  if (t.ziel) t.ziel = Date.now() + t.rest * 1000;
+  wtUhrTick();
+}
+function wtUhrTick() {
+  const jetzt = Date.now();
+  for (const [key, t] of Object.entries(WT_UHR.t)) {
+    if (!t.ziel) continue;
+    const rest = (t.ziel - jetzt) / 1000, sek = Math.ceil(rest);
+    if (rest > 0) {
+      if (sek <= 3 && sek !== t.piep && sek - rest < 0.6) wtPiep(false);    // 3 · 2 · 1 (nicht nachholen, wenn die Seite im Hintergrund war)
+      t.piep = sek;
+      continue;
+    }
+    // Schritt zu Ende (bei verpasster Zeit im Hintergrund mehrere Schritte nachholen, nur ein Ton)
+    if (rest > -1.5) wtPiep(true);
+    let ziel = t.ziel;
+    while (ziel <= jetzt) {
+      if (t.i + 1 < t.schritte.length) { t.i++; ziel += t.schritte[t.i].s * 1000; continue; }
+      if (t.art === 'ueb') { t.satz++; t.i = 0; t.rest = t.schritte[0].s; t.fertig = t.satz >= t.saetze; }
+      else if (t.art === 'pause') { delete WT_UHR.t[key]; WT_UHR.pauseEnde = jetzt; }
+      else { t.fertig = true; t.rest = 0; }
+      ziel = 0; break;
+    }
+    t.ziel = ziel; t.piep = null;
+  }
+  const laeuft = wtUhrLaeuft();
+  if (laeuft && !WT_UHR.iv) WT_UHR.iv = setInterval(wtUhrTick, 200);
+  if (!laeuft && WT_UHR.iv) { clearInterval(WT_UHR.iv); WT_UHR.iv = 0; }
+  if (laeuft !== !!WT_UHR.wach) { WT_UHR.wach = laeuft; wtWach(laeuft); }
+  WT_UHR.karten.forEach((k) => k._uhrZeigen());
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && wtUhrLaeuft()) { WT_UHR.wach = false; wtUhrTick(); } });
+const wtSeiten = (u) => u.seiten ?? /je Seite/.test(u.dosis || '');
+const wtSchritte = (u) => { const s = +u.timer || 30; return wtSeiten(u) ? [{ s: s / 2, seite: 'links' }, { s: s / 2, seite: 'rechts' }] : [{ s }]; };
+const WT_RING_U = 2 * Math.PI * 19;
+const wtUhrHtml = (key, gross) => `<div class="uhr" data-uhr="${key}"><svg width="46" height="46" viewBox="0 0 46 46"><circle class="rb" cx="23" cy="23" r="19" fill="none" stroke-width="5"/>` +
+  `<circle class="rv" cx="23" cy="23" r="19" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="${WT_RING_U.toFixed(1)}" transform="rotate(-90 23 23)"/></svg>` +
+  `<div class="uz"><b class="zeit">${gross}</b><span class="info"></span><span class="ton"></span></div>` +
+  `<span class="ub neu" role="button" aria-label="Zurücksetzen"><ha-icon icon="mdi:restore"></ha-icon></span><span class="ub play" role="button" aria-label="Start/Pause"><ha-icon icon="mdi:play-circle"></ha-icon></span></div>`;
+const WT_ANS_CSS = `
+:host { --wt-lila: color-mix(in srgb, ${WT_KRAFT} 72%, var(--primary-text-color)); --wt-blau: color-mix(in srgb, #90caf9 70%, var(--primary-text-color));
+  --wt-sonne: color-mix(in srgb, #ffb74d 80%, var(--primary-text-color)); --wt-flaeche: rgba(127,127,127,.1); --wt-rand: var(--divider-color, rgba(127,127,127,.25)); }
+.kopf .mod { margin-left: auto; display: inline-flex; padding: 3px; border-radius: 16px; background: var(--wt-flaeche); border: 1px solid var(--wt-rand); }
+.mod span { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; border-radius: 13px; font-size: 12px; font-weight: 600; color: var(--secondary-text-color); cursor: pointer; }
+.mod span.an { background: var(--card-background-color, #2a2a2a); color: var(--primary-text-color); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.kopf .mod ha-icon { --mdc-icon-size: 14px; color: inherit; }
+.mod span.an ha-icon.w { color: var(--wt-blau); } .mod span.an ha-icon.s { color: var(--wt-sonne); }
+.mhinw { font-size: 12px; color: var(--secondary-text-color); margin: -4px 0 10px; display: flex; align-items: center; gap: 6px; }
+.mhinw ha-icon { --mdc-icon-size: 14px; }
+.status { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; margin-bottom: 12px; line-height: 1.4; }
+.status ha-icon { --mdc-icon-size: 18px; flex: none; }
+.status small { color: var(--secondary-text-color); font-size: 13px; }
+.kach { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ka { padding: 10px; border-radius: 12px; background: var(--wt-flaeche); border: 1px solid transparent; cursor: pointer; min-width: 0;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+.ka.wahl { background: rgba(206,147,216,.16); border-color: rgba(206,147,216,.65); }
+.ka .kb { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ka .kb b { font-size: 18px; }
+.badge { font-size: 10px; font-weight: 700; letter-spacing: .03em; color: #2a0f33; background: ${WT_KRAFT}; border-radius: 6px; padding: 1px 6px; }
+.badge.ok { background: #81c995; color: #0d2a14; }
+.ka .kn { font-size: 13px; margin-top: 3px; line-height: 1.3; }
+.ka .kz { font-size: 11.5px; color: var(--secondary-text-color); margin-top: 3px; line-height: 1.35; }
+.woche { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 13px; }
+.woche .wt { flex: 1; min-width: 0; }
+.woche .wt span, .sek { color: var(--secondary-text-color); }
+.pl { width: 24px; height: 24px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; box-sizing: border-box;
+  background: rgba(127,127,127,.15); color: var(--secondary-text-color); flex: none; }
+.xl { font-size: 12px; font-weight: 700; }
+.knoepfe { display: flex; gap: 8px; margin-top: 14px; }
+.btn { flex: 1; min-height: 46px; border-radius: 23px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600; font-size: 15px; border: none;
+  cursor: pointer; font-family: inherit; background: ${WT_KRAFT}; color: #2a0f33; -webkit-tap-highlight-color: transparent; }
+.btn ha-icon { --mdc-icon-size: 20px; }
+.btn.zwei { background: none; color: var(--primary-text-color); border: 1px solid var(--wt-rand); }
+.watch { display: flex; gap: 8px; margin-top: 12px; font-size: 12.5px; color: var(--secondary-text-color); align-items: flex-start; line-height: 1.4; }
+.watch ha-icon { --mdc-icon-size: 16px; flex: none; margin-top: 1px; }
+.watch b { font-weight: 500; color: var(--primary-text-color); }
+.links { display: flex; flex-wrap: wrap; gap: 2px 18px; margin-top: 8px; font-size: 13px; }
+.links span { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; color: var(--secondary-text-color); padding: 6px 0; }
+.links span.l { color: var(--wt-lila); }
+.links ha-icon { --mdc-icon-size: 16px; }
+.aus { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--wt-flaeche); font-size: 13.5px; }
+.aus span { flex: 1; } .aus a { color: var(--wt-lila); cursor: pointer; font-weight: 600; }
+.hinweis { font-size: 13px; color: var(--secondary-text-color); margin: -2px 4px 12px; line-height: 1.45; }
+.sp > * { display: inline-block; width: 100%; box-sizing: border-box; margin-bottom: 12px; break-inside: avoid; -webkit-column-break-inside: avoid; vertical-align: top; }
+.sp.zwei { column-count: 2; column-gap: 16px; }
+ha-card.ueb, ha-card.auf { padding: 12px; }
+.ug { display: flex; gap: 12px; }
+.fb { flex: none; width: 100px; background: #151517; border-radius: 10px; display: flex; align-items: center; justify-content: center; padding: 6px 0; align-self: flex-start; }
+.fb.leer { height: 84px; font-size: 22px; font-weight: 700; color: ${WT_KRAFT}; }
+.ut { flex: 1; min-width: 0; }
+.un { display: flex; align-items: baseline; gap: 6px; } .un .nr { color: var(--secondary-text-color); font-size: 12px; } .un b { font-size: 15.5px; line-height: 1.3; }
+.ud { font-size: 13px; margin-top: 4px; line-height: 1.4; }
+ul.tp { margin: 6px 0 0; padding-left: 16px; font-size: 12.5px; color: var(--secondary-text-color); line-height: 1.45; }
+.st { margin-top: 8px; font-size: 12px; color: var(--secondary-text-color); display: flex; gap: 6px; align-items: flex-start; line-height: 1.4; }
+.st ha-icon { --mdc-icon-size: 14px; flex: none; margin-top: 1px; }
+.paar { border-left: 3px solid rgba(206,147,216,.55); padding-left: 10px; }
+.paar ha-card + ha-card { margin-top: 10px; }
+.pk { font-size: 12px; color: var(--wt-lila); margin: 0 0 8px; display: flex; align-items: center; gap: 6px; }
+.pk ha-icon { --mdc-icon-size: 15px; }
+.uhr { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 8px 10px 12px; border-radius: 10px; background: var(--wt-flaeche); cursor: pointer;
+  user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+.uhr svg { flex: none; } .uhr .rb { stroke: rgba(127,127,127,.25); } .uhr .rv { stroke: ${WT_KRAFT}; }
+.uhr .uz { flex: 1; min-width: 0; } .uhr .zeit { font-size: 22px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.uhr .info { color: var(--secondary-text-color); font-size: 13px; }
+.uhr .ton { display: block; font-size: 11.5px; color: var(--secondary-text-color); margin-top: 2px; }
+.uhr .ton:empty { display: none; }
+.ub { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; color: var(--secondary-text-color); flex: none; }
+.ub.neu ha-icon { --mdc-icon-size: 20px; } .ub.play { color: ${WT_KRAFT}; } .ub.play ha-icon { --mdc-icon-size: 36px; }
+.uhr.still .ub.neu { visibility: hidden; }
+.blink .rv, .blink .zeit, .pausen.blink b { animation: wtBlink .5s steps(2, start) infinite; }
+@keyframes wtBlink { to { opacity: .15; } }
+.ak { display: flex; align-items: center; gap: 8px; cursor: pointer; } .ak b { flex: 1; font-size: 14.5px; } .ak span { font-size: 12px; color: var(--secondary-text-color); }
+.ak ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+.al { margin-top: 8px; font-size: 13px; line-height: 1.8; }
+.ar { display: flex; gap: 8px; cursor: pointer; } .ar span:first-child { flex: 1; min-width: 0; } .ar span:last-child { white-space: nowrap; }
+.ar.done { opacity: .5; text-decoration: line-through; } .ar.jetzt { color: var(--wt-lila); font-weight: 600; }
+.zu .al, .zu .uhr { display: none; }
+.and { display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer; } .and + .and { border-top: 1px solid var(--wt-rand); }
+.and b { width: 18px; font-size: 16px; } .and div { flex: 1; min-width: 0; } .and small { display: block; font-size: 12px; color: var(--secondary-text-color); line-height: 1.4; }
+.and ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+.pausen { position: sticky; bottom: 16px; z-index: 3; display: flex; align-items: center; gap: 8px; height: 58px; padding: 0 8px 0 16px; box-sizing: border-box; border-radius: 29px;
+  background: color-mix(in srgb, var(--card-background-color, #1c1c1c) 90%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  border: 1px solid var(--wt-rand); box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+@media (max-width: 767px) { .pausen { bottom: calc(env(safe-area-inset-bottom, 0px) + 86px); } }
+.pausen .pt { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--secondary-text-color); white-space: nowrap; }
+.pausen .pt ha-icon { --mdc-icon-size: 20px; }
+.pausen .pt b { font-size: 20px; color: var(--primary-text-color); font-variant-numeric: tabular-nums; }
+.pausen .pw { height: 40px; padding: 0 13px; border-radius: 20px; display: inline-flex; align-items: center; font-weight: 600; font-size: 13px; background: rgba(127,127,127,.16);
+  cursor: pointer; color: var(--primary-text-color); -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+.pausen .pw.an { background: ${WT_KRAFT}; color: #2a0f33; }
+.sz { display: flex; align-items: center; gap: 9px; margin: 7px 0; }
+.sz .kw { width: 44px; font-size: 12.5px; color: var(--secondary-text-color); white-space: nowrap; flex: none; }
+.sz.jetzt .kw { color: var(--primary-text-color); font-weight: 600; }
+.sz > ha-icon { --mdc-icon-size: 15px; flex: none; }
+.sz .pls { display: flex; gap: 5px; align-items: center; }
+.sz .x { flex: 1; text-align: right; white-space: nowrap; }
+.sz .n { width: 28px; text-align: right; font-size: 12px; color: var(--secondary-text-color); flex: none; }
+.pause { font-size: 11.5px; padding: 4px 8px; border-radius: 7px; background: rgba(127,127,127,.15); color: var(--secondary-text-color); }
+.trenn { display: flex; align-items: center; gap: 8px; margin: 12px 0 6px; font-size: 11.5px; }
+.trenn ha-icon { --mdc-icon-size: 14px; } .trenn i { flex: 1; height: 1px; background: currentColor; opacity: .3; }
+.regeln { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--wt-rand); font-size: 11.5px; color: var(--secondary-text-color); line-height: 1.7; }
+.regeln ha-icon { --mdc-icon-size: 13px; margin-right: 3px; }
+`;
+// Pille im HA-Stil (Theme-Farben): ok gefüllt, fällig umrandet, offen grau
+const wtPilleT = (t, st) => {
+  const f = t === 'L' ? WT_LAUF : WT_KRAFT;
+  const s = st === 'ok' ? `background:${f};color:#111` : st === 'faellig' ? `border:1.5px solid ${f};color:${t === 'L' ? WT_LAUF : 'var(--wt-lila)'};background:none` : '';
+  return `<span class="pl" style="${s}">${wrEsc(t)}</span>`;
+};
+const wtExtra = (x) => [x.L > 0 ? `<span class="xl" style="color:${WT_LAUF}">+${x.L} L</span>` : '', x.K > 0 ? `<span class="xl" style="color:var(--wt-lila)">+${x.K} K</span>` : ''].filter(Boolean).join(' ');
 class WandTraining extends HTMLElement {
   setConfig(c) {
-    if (!c || !c.art) throw new Error('art fehlt (heute, plan)');
-    this._cfg = Object.assign({ entity: 'sensor.training_heute', wetter: 'sensor.laufwetter', test: 'input_boolean.wand_training_heute_test', ansicht: 'training', ziel: '', weg: 'script.training_heute_nicht', animation: 60 }, c);
+    if (!c || !WT_ARTEN.includes(c.art)) throw new Error(`art fehlt oder unbekannt (${WT_ARTEN.join(', ')})`);
+    this._cfg = Object.assign({ entity: 'sensor.training_heute', wetter: 'sensor.laufwetter', test: 'input_boolean.wand_training_heute_test', ansicht: 'training', ziel: '', weg: 'script.training_heute_nicht', animation: 60,
+      stand: 'sensor.training_stand', strava: 'sensor.strava_stats', modus: 'input_select.training_modus', laeuft: 'input_text.training_laeuft', wochen: 8 }, c);
     this._sig = null;
     this._vollH = {};
+    if (c.einheiten) this._einh = c.einheiten;
   }
-  getCardSize() { return this._cfg && this._cfg.art === 'plan' ? 8 : 3; }
-  getGridOptions() { return { columns: 12, min_columns: 6 }; }
+  getCardSize() { return { einheit: 12, naechste: 5, saison: 6 }[this._cfg && this._cfg.art] || 3; }
+  getGridOptions() { return { columns: this._cfg && this._cfg.art !== 'heute' ? 'full' : 12, min_columns: 6 }; }      // full: einheit füllt auch einen Abschnitt mit column_span 2
   set hass(h) {
     this._hass = h;
     const c = this._cfg, e = h && h.states[c.entity], t = h && h.states[c.test], w = h && h.states[c.wetter];
-    if (c.art === 'heute' && !this._einh && !this._laedt) {
+    if ((c.art === 'heute' || c.art === 'naechste') && !this._einh && !this._laedt) {
       this._laedt = true;
       const dash = c.dashboard || location.pathname.split('/')[1] || 'home-new';
       if (!c.ziel) c.ziel = `/${dash}/${c.ansicht}`;
@@ -1096,24 +1480,47 @@ class WandTraining extends HTMLElement {
       });
       laden();
     }
-    const sig = [e ? e.state : '', e ? e.last_updated : '', t ? t.state : '', w ? w.last_updated : '', !!this._einh, this._kompakt].join('|');
+    const lu = (id) => { const x = h && h.states[id]; return x ? `${x.state}@${x.last_updated}` : ''; };
+    let sig;
+    if (c.art === 'heute') sig = [e ? e.state : '', e ? e.last_updated : '', t ? t.state : '', w ? w.last_updated : '', !!this._einh, this._kompakt].join('|');
+    else if (c.art === 'naechste') sig = [lu(c.entity), lu(c.stand), lu(c.modus), lu(c.laeuft), wtWahl.e, !!this._einh, wsHeute()].join('|');
+    else if (c.art === 'einheit') sig = [e ? e.state : '', e && e.attributes.daten ? e.attributes.daten.kraft : '', wtWahl.e].join('|');
+    else sig = [lu(c.entity), lu(c.stand), h && h.states[c.strava] ? h.states[c.strava].last_updated : '', wsHeute()].join('|');
     if (sig === this._sig) return;
     this._sig = sig;
     this._render();
   }
-  connectedCallback() { if (this._cfg && this._cfg.art === 'heute') requestAnimationFrame(() => this._stapelBeobachten()); }
+  connectedCallback() {
+    const art = this._cfg && this._cfg.art;
+    if (art === 'heute') requestAnimationFrame(() => this._stapelBeobachten());
+    if (art === 'naechste' || art === 'einheit') {
+      this._wahlHoerer = () => { this._sig = null; if (this._hass) this.hass = this._hass; };
+      window.addEventListener('wand-training-wahl', this._wahlHoerer);
+    }
+    if (art === 'einheit') {
+      WT_UHR.karten.add(this);
+      if (typeof ResizeObserver !== 'undefined') {
+        this._ro = new ResizeObserver(() => { const sp = this.shadowRoot && this.shadowRoot.getElementById('sp'); if (sp) sp.classList.toggle('zwei', this.clientWidth >= 640); });
+        this._ro.observe(this);
+      }
+    }
+  }
   disconnectedCallback() {
     if (this._ro) { this._ro.disconnect(); this._ro = null; }
     if (this._mo) { this._mo.disconnect(); this._mo = null; }
+    if (this._wahlHoerer) { window.removeEventListener('wand-training-wahl', this._wahlHoerer); this._wahlHoerer = null; }
+    WT_UHR.karten.delete(this);
     clearTimeout(this._still); clearTimeout(this._nochmal);
     if (!this._einh) this._laedt = false;
   }
   _render() {
     if (!this._cfg || !this._hass) return;
     if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
-    if (this._cfg.art === 'plan') { this._plan(); return; }
-    if (this._cfg.art !== 'heute') { this.shadowRoot.innerHTML = `<div>Unbekannte Art „${wrEsc(this._cfg.art)}“</div>`; return; }
-    this._heute();
+    const art = this._cfg.art;
+    if (art === 'heute') this._heute();
+    else if (art === 'naechste') this._naechste();
+    else if (art === 'einheit') this._einheit();
+    else this._saison();
   }
 
   // ----- art: heute (Wand) -----
@@ -1250,33 +1657,246 @@ class WandTraining extends HTMLElement {
     if (kompakt !== !!this._kompakt) { this._kompakt = kompakt; this._sig = null; this._render(); }
   }
 
-  // ----- art: plan (Unteransicht, vorläufig bis Phase 4) -----
-  _plan() {
-    const c = this._cfg, ein = c.einheiten || {}, e = this._hass.states[c.entity], z = e ? e.state : '';
-    const html = Object.entries(ein).map(([k, E]) => {
-      const auf = (E.aufwaermen || []).length ? `<div class="pa">Aufwärmen · ${(E.aufwaermen || []).map((u) => `${wrEsc(u.n)} <span>${wrEsc(u.dosis || '')}</span>`).join(' · ')}</div>` : '';
-      const paar = {}; (E.paare || []).forEach((p) => p.forEach((n) => { paar[n] = p.filter((m) => m !== n); }));
-      const ueb = (E.uebungen || []).map((u, i) => {
-        const fig = wtFigur(u.id, { groesse: 64 });
-        const zus = paar[i + 1] ? ` · im Wechsel mit ${paar[i + 1].join(', ')}` : '';
-        return `<div class="pu">${fig ? `<div class="pf">${fig}</div>` : `<div class="pf pn">${i + 1}</div>`}<div><b>${i + 1}. ${wrEsc(u.n)}</b><div class="pd">${wrEsc([u.dosis, u.last].filter(Boolean).join(' · '))}${zus}</div>` +
-          `${(u.tipps || []).length ? `<div class="pt">${u.tipps.map(wrEsc).join(' · ')}</div>` : ''}${u.steigern ? `<div class="pt">Steigern: ${wrEsc(u.steigern)}</div>` : ''}</div></div>`;
-      }).join('');
-      return `<div class="kopf"><ha-icon icon="${E.icon || 'mdi:dumbbell'}"></ha-icon><span class="t">${k} · ${wrEsc(E.name || '')}</span><span class="r">${z === k ? 'heute dran · ' : ''}≈ ${E.dauer || '?'} min</span></div>` +
-        `<ha-card>${E.runden ? `<div class="pa">${wrEsc(E.runden)}</div>` : ''}${auf}${ueb}</ha-card>`;
-    }).join('<div style="height:16px"></div>');
-    this.shadowRoot.innerHTML = `<style>${WS_CSS}
-      .pa { font-size: 13px; color: var(--secondary-text-color); margin-bottom: 12px; line-height: 1.5; }
-      .pa span { opacity: .8; }
-      .pu { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: start; }
-      .pu + .pu { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--divider-color, rgba(127,127,127,.2)); }
-      .pu b { font-size: 15px; }
-      .pf { border-radius: 10px; background: #1b1d20; padding: 4px 0; display: flex; justify-content: center; }
-      .pn { height: 56px; align-items: center; font-size: 20px; font-weight: 700; color: ${WT_KRAFT}; }
-      .pd { font-size: 13px; margin-top: 2px; }
-      .pt { font-size: 12.5px; color: var(--secondary-text-color); margin-top: 4px; line-height: 1.4; }
-    </style>${html || '<ha-card><div class="leer">Keine Einheiten konfiguriert (einheiten)</div></ha-card>'}`;
+  // ----- gemeinsame Daten der Ansicht -----
+  _daten() {
+    const h = this._hass, c = this._cfg, e = h.states[c.entity], st = h.states[c.stand];
+    const d = (e && e.attributes.daten) || {}, s = (st && st.attributes.daten) || {};
+    return { z: e ? e.state : '', d, s, einh: this._einh || {} };
+  }
+  _skript(name, daten, meldung) {
+    const [dom, srv] = name.includes('.') ? name.split('.') : ['script', name];
+    return this._hass.callService(dom, srv, daten || {}).then(() => { if (meldung) wtToast(this, meldung); }, (x) => wtToast(this, `Fehler: ${x && x.message ? x.message : x}`));
+  }
+  _kopfHtml(icon, titel, rechts) { return `<div class="kopf"><ha-icon icon="${icon}"></ha-icon><span class="t">${wrEsc(titel)}</span>${rechts || ''}</div>`; }
+
+  // ----- art: naechste – Umschalter Winter|Sommer, Kacheln A/B/C, Wochen-Soll, Start, Erledigt, Woche aussetzen, Korrektur (lange drücken) -----
+  _naechste() {
+    const h = this._hass, c = this._cfg, { z, d, s, einh } = this._daten();
+    const hm = h.states[c.modus] ? h.states[c.modus].state : 'winter', wm = d.modus || hm;
+    const vor = wtVorschlag(z, d), sel = wtWahl.e || vor, E = einh[sel] || {};
+    const okWoche = new Set((d.woche || []).filter((w) => w.st === 'ok').map((w) => w.e));
+    const heuteErl = d.kraft_heute || [];
+    // Start-Knopf: läuft eine Einheit (≤ 4 h)?
+    let laeuft = null;
+    try { const j = JSON.parse((h.states[c.laeuft] || {}).state || ''); if (j && j.e && Date.now() - new Date(j.t).getTime() < 4 * 3600000) laeuft = j; } catch (x) { /* leer */ }
+    const modus = `<span class="mod">${[['winter', 'mdi:snowflake', 'Winter', 'w'], ['sommer', 'mdi:white-balance-sunny', 'Sommer', 's']].map(([m, ic, t, k]) =>
+      `<span class="${m === wm ? 'an' : ''}" data-modus="${m}"><ha-icon class="${k}" icon="${ic}"></ha-icon>${t}</span>`).join('')}</span>`;
+    let h_ = '';
+    if (hm !== wm) h_ += `<div class="mhinw"><ha-icon icon="${hm === 'winter' ? 'mdi:snowflake' : 'mdi:white-balance-sunny'}" style="color:var(${hm === 'winter' ? '--wt-blau' : '--wt-sonne'})"></ha-icon>Diese Woche noch ${wm === 'sommer' ? 'Sommer' : 'Winter'} · ab Montag ${hm === 'sommer' ? 'Sommer' : 'Winter'}</div>`;
+    // Status des Tages aus dem Motor
+    const nm = (x) => (einh[x] && einh[x].name ? ` · ${wrEsc(einh[x].name)}` : '');
+    const da = d.danach || {};
+    if (heuteErl.length) h_ += `<div class="status"><ha-icon icon="mdi:check-circle" style="color:#81c995"></ha-icon><span>Heute erledigt: ${heuteErl.map((x) => wrEsc(x) + nm(x)).join(', ')}</span></div>`;
+    else if (z === 'L') h_ += `<div class="status"><ha-icon icon="mdi:run" style="color:${WT_LAUF}"></ha-icon><span>Heute dran: Laufen${da.e ? `<small> · Kraft ${da.wann === 'heute' ? 'sonst' : 'morgen'}: ${wrEsc(da.e)}${nm(da.e)}</small>` : ''}</span></div>`;
+    else if (z === 'fertig') h_ += `<div class="status"><ha-icon icon="mdi:party-popper" style="color:#81c995"></ha-icon><span>Woche geschafft<small> · alles Weitere zählt als Extra</small></span></div>`;
+    else if (z === 'nichts' && !d.pause) h_ += `<div class="status"><ha-icon icon="mdi:sofa-outline" class="sek"></ha-icon><span>Heute kein Vorschlag${d.grund ? `<small> · ${wrEsc(d.grund)}</small>` : ''}${da.e ? `<small> · morgen: ${wrEsc(da.e)}${nm(da.e)}</small>` : ''}</span></div>`;
+    else if (d.grund && ['A', 'B', 'C'].includes(z)) h_ += `<div class="status"><ha-icon icon="mdi:information-outline" style="color:#ffb340"></ha-icon><span style="color:var(--warning-color,#ffa726)">${wrEsc(d.grund)}</span></div>`;
+    // Kacheln
+    const zul = d.zuletzt || {};
+    h_ += `<div class="kach">${['A', 'B', 'C'].map((x) => {
+      const X = einh[x] || {}, badge = heuteErl.includes(x) || okWoche.has(x) ? '<span class="badge ok">✓</span>' : x === z ? '<span class="badge">HEUTE</span>' : x === vor && z !== 'fertig' ? '<span class="badge">FÄLLIG</span>' : '';
+      const zt = zul[x] ? `zuletzt ${wtTagText(zul[x])}` : 'noch nie';
+      return `<div class="ka${x === sel ? ' wahl' : ''}" data-e="${x}"><div class="kb"><b>${x}</b>${badge}</div><div class="kn">${wrEsc(X.name || '')}</div><div class="kz">${X.dauer ? `${X.dauer} min · ` : ''}${zt}</div></div>`;
+    }).join('')}</div>`;
+    // Wochen-Soll
+    const ok = (d.woche || []).filter((w) => w.st === 'ok').length, n = (d.woche || []).length || 4;
+    const pillen = (d.woche || []).map((w) => wtPilleT(w.st === 'ok' ? w.e || w.s : w.s, w.st)).join('');
+    h_ += d.pause
+      ? `<div class="aus"><ha-icon icon="mdi:pause-circle-outline"></ha-icon><span>Woche ausgesetzt</span><a id="weiter">wieder aufnehmen</a></div>`
+      : `<div class="woche"><span class="wt">Diese Woche <span>· ${ok} von ${n}</span></span>${wtExtra(d.extra || {})}${pillen}</div>`;
+    // Knöpfe
+    const lz = laeuft && laeuft.e === sel ? new Date(laeuft.t) : null;
+    h_ += `<div class="knoepfe">${lz
+      ? `<button class="btn zwei" id="start"><ha-icon icon="mdi:timer-play-outline"></ha-icon>${sel} läuft seit ${wrHM(lz)}</button>`
+      : `<button class="btn" id="start"><ha-icon icon="mdi:play"></ha-icon>${sel} starten</button>`}</div>`;
+    h_ += `<div class="watch"><ha-icon icon="mdi:watch"></ha-icon><span>Watch: <b>Funktionales Krafttraining</b> – zählt als ${sel}${sel === vor ? '' : ' (nach dem Start)'}. Andere Einheit? Oben antippen.` +
+      `${(s.eintraege || []).length ? ' Falsch gezählt? Kachel lange drücken.' : ''}</span></div>`;
+    h_ += `<div class="links"><span class="l" id="erledigt"><ha-icon icon="mdi:check-circle-outline"></ha-icon>Ohne Watch erledigt</span>${d.pause ? '' : '<span id="aussetzen"><ha-icon icon="mdi:pause-circle-outline"></ha-icon>Woche aussetzen</span>'}</div>`;
+    this.shadowRoot.innerHTML = `<style>${WS_CSS}${WT_ANS_CSS}</style>${this._kopfHtml('mdi:dumbbell', 'Nächste Einheit', modus)}<ha-card>${h_}</ha-card>`;
+
+    // Bedienung
+    const $ = (id) => this.shadowRoot.getElementById(id);
+    this.shadowRoot.querySelectorAll('[data-modus]').forEach((el) => el.addEventListener('click', () => {
+      const m = el.dataset.modus;
+      if (m === wm && m === hm) return;
+      const soll = m === 'sommer' ? '2 Läufe · 1 Kraft (A/B im Wechsel) · 1 Stabi' : 'A · B · C · 1 Lauf am Wochenende';
+      wtFrage(`${m === 'sommer' ? 'Sommermodus' : 'Wintermodus'} ab sofort?`, `Die laufende Woche zählt dann mit dem ${m === 'sommer' ? 'Sommer' : 'Winter'}-Soll: ${soll}.`,
+        [{ t: 'Umschalten', haupt: 1, f: () => this._skript('training_modus', { modus: m }, `${m === 'sommer' ? 'Sommer' : 'Winter'}modus an`) }, { t: 'Abbrechen' }]);
+    }));
+    this.shadowRoot.querySelectorAll('.ka').forEach((el) => {
+      const x = el.dataset.e;
+      let tm = 0, lang = false;
+      const ab = () => { clearTimeout(tm); tm = 0; };
+      el.addEventListener('pointerdown', () => { lang = false; ab(); tm = setTimeout(() => { lang = true; tm = 0; this._korrektur(x); }, 650); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => el.addEventListener(ev, ab));
+      el.addEventListener('contextmenu', (ev) => ev.preventDefault());
+      el.addEventListener('click', () => { if (lang) { lang = false; return; } wtWaehlen(x === vor ? '' : x); });
+    });
+    $('start').addEventListener('click', () => this._skript('training_starten', { einheit: sel }, lz ? `${sel}: Start erneuert` : `${sel} gestartet – das Watch-Training zählt als ${sel}`));
+    $('erledigt').addEventListener('click', () => wtFrage(`${sel} als erledigt eintragen?`,
+      'Für heute, ohne Watch-Aktivität. Kommt sie später doch noch, wird sie an diesen Eintrag gehängt statt doppelt gezählt.',
+      [{ t: `${sel} eintragen`, haupt: 1, f: () => this._skript('training_erledigt', { einheit: sel }, `${sel} eingetragen`) }, { t: 'Abbrechen' }]));
+    if ($('aussetzen')) $('aussetzen').addEventListener('click', () => wtFrage('Woche aussetzen?',
+      'Krank oder Urlaub: diese Woche kein Soll, keine Erinnerung, kein Vorschlag auf der Wand. Was du trotzdem machst, zählt. Rückgängig mit „wieder aufnehmen“.',
+      [{ t: 'Woche aussetzen', haupt: 1, f: () => this._skript('training_woche_aussetzen', { aus: true }, 'Woche ausgesetzt') }, { t: 'Abbrechen' }]));
+    if ($('weiter')) $('weiter').addEventListener('click', () => wtFrage('Woche wieder aufnehmen?', 'Das Soll der Woche gilt wieder, die Wand schlägt wieder vor.',
+      [{ t: 'Wieder aufnehmen', haupt: 1, f: () => this._skript('training_woche_aussetzen', { aus: false }, 'Woche wieder aufgenommen') }, { t: 'Abbrechen' }]));
+  }
+  // Lange drücken auf eine Kachel: den letzten Eintrag dieser Einheit korrigieren (mit sid gezielt; ohne sid nur, wenn er der letzte überhaupt ist)
+  _korrektur(x) {
+    const { s, einh } = this._daten(), ein = s.eintraege || [];
+    let i = -1;
+    ein.forEach((q, k) => { if (q.e === x && (i < 0 || q.d >= ein[i].d)) i = k; });
+    if (i < 0) { wtToast(this, `${x} ist noch nicht eingetragen`); return; }
+    const q = ein[i], letzter = i === ein.length - 1;
+    if (!q.sid && !letzter) { wtToast(this, 'Ohne Watch-Aktivität lässt sich nur der letzte Eintrag ändern'); return; }
+    const k = (e) => ({ t: e === 'keine' ? 'Zählt nicht' : `War eigentlich ${e}${einh[e] && einh[e].name ? ` · ${einh[e].name}` : ''}`, warn: e === 'keine',
+      f: () => this._skript('training_korrigieren', Object.assign({ einheit: e }, q.sid ? { sid: String(q.sid) } : {}), e === 'keine' ? `${x} vom ${wtTagText(q.d)} zählt nicht` : `${wtTagText(q.d)}: ${x} → ${e}`) });
+    wtFrage(`${x} vom ${wtTagText(q.d)} korrigieren`, [WT_QUELLE[q.q] || q.q, q.min ? `${Math.round(q.min)} min` : ''].filter(Boolean).join(', '),
+      [...['A', 'B', 'C'].filter((e) => e !== x).map(k), k('keine'), { t: 'Abbrechen' }]);
+  }
+
+  // ----- art: einheit – Aufwärmen mit durchlaufendem Timer, Übungskarten mit Figur (Paare in B), Timer-Ring bei Halteübungen, Pausenleiste -----
+  _einheit() {
+    const { z, d, einh } = this._daten();
+    const vor = wtVorschlag(z, d), sel = wtWahl.e || vor, E = einh[sel];
+    if (!E) { this.shadowRoot.innerHTML = `<style>${WS_CSS}</style><ha-card><div class="leer">Keine Einheiten konfiguriert (einheiten)</div></ha-card>`; return; }
+    const heute = sel === z ? 'heute dran · ' : '';
+    let blocks = [];
+    const auf = E.aufwaermen || [];
+    if (auf.length) {
+      const sum = auf.reduce((x, u) => x + (+u.timer || 30), 0), zu = WT_UHR.zu && WT_UHR.zu[sel];
+      blocks.push(`<ha-card class="auf${zu ? ' zu' : ''}" id="auf"><div class="ak" id="ak"><b>Aufwärmen</b><span>≈ ${Math.max(1, Math.round(sum / 60))} min · ohne Pause</span><ha-icon icon="${zu ? 'mdi:chevron-down' : 'mdi:chevron-up'}"></ha-icon></div>` +
+        `<div class="al">${auf.map((u, i) => `<div class="ar" data-i="${i}"><span>${wrEsc(u.n)}</span><span>${wrEsc(u.dosis || '')}</span></div>`).join('')}</div>${wtUhrHtml(`auf:${sel}`, wtMs(wtSchritte(auf[0])[0].s))}</ha-card>`);
+    }
+    const ueb = E.uebungen || [], paar = {};
+    (E.paare || []).forEach((p) => p.forEach((n) => { paar[n] = p; }));
+    const karte = (u, i) => {
+      const fig = wtFigur(u.id, { groesse: 92 });
+      return `<ha-card class="ueb"><div class="ug">${fig ? `<div class="fb">${fig}</div>` : `<div class="fb leer">${i + 1}</div>`}<div class="ut">` +
+        `<div class="un"><span class="nr">${i + 1}</span><b>${wrEsc(u.n)}</b></div><div class="ud">${wrEsc(u.dosis || '')}${u.last ? `<span class="sek"> · ${wrEsc(u.last)}</span>` : ''}</div>` +
+        `${(u.tipps || []).length ? `<ul class="tp">${u.tipps.map((t) => `<li>${wrEsc(t)}</li>`).join('')}</ul>` : ''}</div></div>` +
+        `${u.steigern ? `<div class="st"><ha-icon icon="mdi:trending-up"></ha-icon><span>Steigern: ${wrEsc(u.steigern)}</span></div>` : ''}` +
+        `${u.timer ? wtUhrHtml(`ueb:${sel}:${i}`, wtMs(wtSchritte(u)[0].s)) : ''}</ha-card>`;
+    };
+    for (let i = 0; i < ueb.length; i++) {
+      const p = paar[i + 1];
+      if (p && p[0] === i + 1) {
+        const glied = p.map((n) => ueb[n - 1] ? karte(ueb[n - 1], n - 1) : '').join('');
+        blocks.push(`<div class="paar"><div class="pk"><ha-icon icon="mdi:swap-vertical"></ha-icon>${p.join(' ↔ ')} im Wechsel · die andere Übung ist die Pause</div>${glied}</div>`);
+        i += p.length - 1;
+      } else if (!p) blocks.push(karte(ueb[i], i));
+    }
+    const andere = ['A', 'B', 'C'].filter((x) => x !== sel && einh[x]);
+    if (andere.length && this._cfg.andere !== false) {
+      blocks.push(`<ha-card class="ueb"><div class="ak" style="cursor:default"><b>Die anderen Einheiten</b></div>${andere.map((x) =>
+        `<div class="and" data-e="${x}"><b>${x}</b><div>${wrEsc(einh[x].name || '')}<small>${wrEsc(wtNamen(einh[x]).slice(0, 4).join(' · '))}${wtNamen(einh[x]).length > 4 ? ' …' : ''}</small></div><ha-icon icon="mdi:chevron-right"></ha-icon></div>`).join('')}</ha-card>`);
+    }
+    const pausen = (E.pausen || [45, 60, 90]).map((p) => `<span class="pw" data-p="${p}">${wtMs(p)}</span>`).join('');
+    this.shadowRoot.innerHTML = `<style>${WS_CSS}${WT_ANS_CSS}</style>${this._kopfHtml(E.icon || 'mdi:dumbbell', `${sel} · ${E.name || ''}`, `<span class="r">${heute}≈ ${E.dauer || '?'} min</span>`)}` +
+      `${E.hinweis || E.runden ? `<div class="hinweis">${wrEsc(E.hinweis || E.runden)}</div>` : ''}` +
+      `<div class="sp${this.clientWidth >= 640 ? ' zwei' : ''}" id="sp">${blocks.join('')}</div>` +
+      `<div class="pausen" id="pausen"><span class="pt"><ha-icon icon="mdi:timer-outline"></ha-icon><span id="pzeit">Pause</span></span>${pausen}</div>`;
+
+    // Timer-Definitionen dieser Einheit (Schritte aus der Konfiguration)
+    this._uhrDef = {};
+    if (auf.length) this._uhrDef[`auf:${sel}`] = () => ({ art: 'auf', n: auf.length, schritte: auf.flatMap((u, i) => wtSchritte(u).map((x) => Object.assign({ u: i }, x))) });
+    ueb.forEach((u, i) => { if (u.timer) this._uhrDef[`ueb:${sel}:${i}`] = () => ({ art: 'ueb', saetze: +E.saetze || 3, schritte: wtSchritte(u) }); });
+    const R = this.shadowRoot;
+    R.querySelectorAll('.uhr').forEach((el) => {
+      const key = el.dataset.uhr;
+      el.addEventListener('click', (ev) => {
+        wtTonAn();
+        if (ev.target.closest('.neu')) { delete WT_UHR.t[key]; wtUhrTick(); this._uhrZeigen(); return; }
+        if (!WT_UHR.t[key]) wtUhrNeu(key, this._uhrDef[key]());
+        wtUhrStartStop(key);
+        this._uhrZeigen();
+      });
+    });
+    R.querySelectorAll('.ar').forEach((el) => el.addEventListener('click', () => {
+      const key = `auf:${sel}`, i = +el.dataset.i;
+      wtTonAn();
+      if (!WT_UHR.t[key]) wtUhrNeu(key, this._uhrDef[key]());
+      const t = WT_UHR.t[key], k = t.schritte.findIndex((x) => x.u === i);
+      wtUhrSpringen(key, k);
+      this._uhrZeigen();
+    }));
+    const ak = R.getElementById('ak');
+    if (ak) ak.addEventListener('click', () => { WT_UHR.zu = WT_UHR.zu || {}; WT_UHR.zu[sel] = !WT_UHR.zu[sel]; this._sig = null; this._render(); });
+    R.querySelectorAll('.and').forEach((el) => el.addEventListener('click', () => { wtWaehlen(el.dataset.e === vor ? '' : el.dataset.e); this.scrollIntoView({ behavior: 'smooth', block: 'start' }); }));
+    R.querySelectorAll('.pw').forEach((el) => el.addEventListener('click', () => {
+      wtTonAn();
+      const p = +el.dataset.p, t = WT_UHR.t.pause;
+      if (t && t.dauer === p) delete WT_UHR.t.pause;
+      else { wtUhrNeu('pause', { art: 'pause', dauer: p, schritte: [{ s: p }] }); wtUhrStartStop('pause'); }
+      wtUhrTick(); this._uhrZeigen();
+    }));
+    this._uhrZeigen();
+  }
+  // Timer-Anzeigen dieser Karte aktualisieren (vom Takt in wtUhrTick und nach jedem Render)
+  _uhrZeigen() {
+    const R = this.shadowRoot; if (!R || this._cfg.art !== 'einheit') return;
+    const jetzt = Date.now(), tonHinweis = !wtTonOk() ? 'Kein Ton möglich – der Ring blinkt in den letzten 3 s' : wtIos ? 'Kein Ton? Stummschalter am iPhone – der Ring blinkt in den letzten 3 s' : '';
+    R.querySelectorAll('.uhr').forEach((el) => {
+      const key = el.dataset.uhr, t = WT_UHR.t[key], def = this._uhrDef && this._uhrDef[key] && this._uhrDef[key]();
+      if (!def) return;
+      const sch = t ? t.schritte[t.i] : def.schritte[0];
+      const rest = t ? (t.ziel ? Math.max(0, (t.ziel - jetzt) / 1000) : t.rest) : sch.s;
+      const laeuft = !!(t && t.ziel), fertig = !!(t && t.fertig);
+      el.querySelector('.zeit').textContent = fertig ? '✓' : wtMs(rest);
+      let info;
+      if (def.art === 'auf') info = fertig ? ' Aufwärmen fertig' : ` / ${wtMs(sch.s)}${sch.seite ? ` · ${sch.seite}` : ''} · ${(sch.u || 0) + 1}/${def.n}`;
+      else { const satz = t ? t.satz : 0; info = fertig ? ` alle ${def.saetze} Sätze` : ` / ${wtMs(sch.s)}${sch.seite ? ` · ${sch.seite}` : ''} · Satz ${Math.min(satz + 1, def.saetze)}/${def.saetze}`; }
+      el.querySelector('.info').textContent = info;
+      el.querySelector('.ton').textContent = laeuft ? tonHinweis : '';
+      el.querySelector('.rv').setAttribute('stroke-dashoffset', (WT_RING_U * (fertig ? 0 : 1 - rest / sch.s)).toFixed(1));
+      el.querySelector('.play ha-icon').setAttribute('icon', laeuft ? 'mdi:pause-circle' : fertig ? 'mdi:replay' : 'mdi:play-circle');
+      el.classList.toggle('blink', laeuft && rest <= 3);
+      el.classList.toggle('still', !t);
+      if (def.art === 'auf') {
+        const cur = t ? (fertig ? def.n : sch.u) : -1;
+        el.parentNode.querySelectorAll('.ar').forEach((r) => { const i = +r.dataset.i; r.classList.toggle('done', i < cur); r.classList.toggle('jetzt', i === cur && !!t); });
+      }
+    });
+    const p = WT_UHR.t.pause, pz = R.getElementById('pzeit'), bar = R.getElementById('pausen');
+    if (pz) {
+      const rest = p ? Math.max(0, (p.ziel - jetzt) / 1000) : 0;
+      const vorbei = !p && WT_UHR.pauseEnde && jetzt - WT_UHR.pauseEnde < 5000;
+      pz.innerHTML = p ? `<b>${wtMs(rest)}</b> / ${wtMs(p.dauer)}` : vorbei ? '<b>Weiter!</b>' : 'Pause';
+      bar.classList.toggle('blink', !!p && rest <= 3);
+      R.querySelectorAll('.pw').forEach((el) => el.classList.toggle('an', !!p && +el.dataset.p === p.dauer));
+      if (vorbei) { clearTimeout(this._weiter); this._weiter = setTimeout(() => this._uhrZeigen(), 5100); }
+    }
+  }
+
+  // ----- art: saison – Soll/Ist je ISO-Woche (Kraft/Stabi + Modus/Pause aus sensor.training_stand, Läufe aus strava_stats.liste) -----
+  _saison() {
+    const h = this._hass, c = this._cfg, { d, s } = this._daten();
+    const liste = ((h.states[c.strava] || {}).attributes || {}).liste || [];
+    const heute = wsHeute(), kwJetzt = wtKw(heute), mo0 = wtMontag(heute), N = Math.max(1, +c.wochen || 8);
+    const wo = {}; (s.wochen || []).forEach((w) => { wo[w.kw] = w; });
+    const ein = {}; (s.eintraege || []).forEach((q) => { if (['A', 'B', 'C'].includes(q.e)) { const k = wtKw(wsTag(q.d)); (ein[k] = ein[k] || []).push(q.e); } });
+    const lauf = {}; liste.forEach((x) => { if (x && x[1] === 'running') { const k = wtKw(wsTag(String(x[0]).slice(0, 10))); lauf[k] = (lauf[k] || 0) + 1; } });
+    const hm = h.states[c.modus] ? h.states[c.modus].state : 'winter';
+    let zeilen = '', mVor = null;
+    for (let i = N - 1; i >= 0; i--) {
+      const mo = mo0 - 7 * i, k = wtKw(mo), jetzt = k === kwJetzt;
+      const m = (jetzt && d.modus) || (wo[k] && wo[k].m) || hm, p = jetzt ? !!d.pause : !!(wo[k] && wo[k].p);
+      const r = jetzt && d.woche ? { woche: d.woche, extra: d.extra || {} } : wtSollIst(m, ein[k] || [], lauf[k] || 0);
+      if (mVor && m !== mVor) {
+        const f = m === 'winter' ? 'var(--wt-blau)' : 'var(--wt-sonne)';
+        zeilen += `<div class="trenn" style="color:${f}"><ha-icon icon="${m === 'winter' ? 'mdi:snowflake' : 'mdi:white-balance-sunny'}"></ha-icon>${m === 'winter' ? 'Winter' : 'Sommer'} seit Mo ${wsKurz(mo)}<i></i></div>`;
+      }
+      mVor = m;
+      const ok = r.woche.filter((w) => w.st === 'ok');
+      const pl = p ? `<span class="pause">Pause</span>${ok.map((w) => wtPilleT(w.e || w.s, 'ok')).join('')}` : r.woche.map((w) => wtPilleT(w.st === 'ok' ? w.e || w.s : w.s, w.st)).join('');
+      zeilen += `<div class="sz${jetzt ? ' jetzt' : ''}"><span class="kw">KW ${+k.slice(5)}</span><ha-icon icon="${m === 'winter' ? 'mdi:snowflake' : 'mdi:white-balance-sunny'}" style="color:var(${m === 'winter' ? '--wt-blau' : '--wt-sonne'})"></ha-icon>` +
+        `<span class="pls">${pl}</span><span class="x">${wtExtra(r.extra)}</span><span class="n">${p ? '–' : `${ok.length}/${r.woche.length}`}</span></div>`;
+    }
+    const regeln = `<div class="regeln"><ha-icon icon="mdi:white-balance-sunny" style="color:var(--wt-sonne)"></ha-icon>Sommer: 2 Läufe · 1 Kraft (A/B im Wechsel) · 1 Stabi<br>` +
+      `<ha-icon icon="mdi:snowflake" style="color:var(--wt-blau)"></ha-icon>Winter: A · B · C · 1 Lauf am Wochenende</div>`;
+    this.shadowRoot.innerHTML = `<style>${WS_CSS}${WT_ANS_CSS}</style>${this._kopfHtml('mdi:calendar-sync', 'Saison', '<span class="r">Soll je Woche</span>')}<ha-card>${zeilen}${regeln}</ha-card>`;
   }
 }
 if (!customElements.get('wand-training')) customElements.define('wand-training', WandTraining);
-if (!window.customCards.some((c) => c.type === 'wand-training')) window.customCards.push({ type: 'wand-training', name: 'Wand-Training', description: 'Heute-Karte (Wand) und Übungen der Ansicht Training' });
+if (!window.customCards.some((c) => c.type === 'wand-training')) window.customCards.push({ type: 'wand-training', name: 'Wand-Training', description: 'Heute-Karte (Wand) und Ansicht Training (naechste, einheit, saison)' });
