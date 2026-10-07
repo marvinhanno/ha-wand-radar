@@ -1,4 +1,4 @@
-// wand-radar 1.9 (Routen- und Trainingsmodus, Elemente für die Ansicht „Sport“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.10 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -14,6 +14,8 @@
 //   Umschalter dann „Training | Radar“. Keine Strava-Abfrage hier, nur hass.states.
 // - Ansicht „Sport“ (seit 1.8): zweites Element custom:wand-sport (art: woche | letzte | jahr | monate | kalender | bestwerte) in derselben Datei.
 //   Liest nur sensor.strava_stats bzw. sensor.strava_latest_activity (hass.states), keine Abfrage, im HA-Kartenstil (ha-card, Theme-Variablen).
+// - Training (seit 1.10): drittes Element custom:wand-training (art: heute = Heute-Karte der Wand mit Strichfigur, art: plan = Übungsliste);
+//   liest sensor.training_heute, die Übungen (einheiten) stehen in der Kartenkonfiguration der Ansicht „training“.
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 20 * 60 * 1000;
@@ -893,3 +895,308 @@ class WandSport extends HTMLElement {
 if (!customElements.get('wand-sport')) customElements.define('wand-sport', WandSport);
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === 'wand-sport')) window.customCards.push({ type: 'wand-sport', name: 'Wand-Sport (Strava-Statistik)', description: 'Karten der Ansicht Sport' });
+
+// ---------- Training (custom:wand-training, seit 1.10) ----------
+// art: heute (Wand, linker Stapel: „Heute dran: A · Beine“ mit Mini-Figur) · plan (Unteransicht „Training“: Übungsliste je Einheit, bis die
+// Ansicht ausgebaut ist). Daten: sensor.training_heute (Vorschlag-Motor in HA). Die Übungen stehen nur an EINER Stelle: in der Kartenkonfiguration
+// (`einheiten`) der Ansicht „training“; die Wand-Karte liest sie per Websocket (lovelace/config) von dort. Im Code stecken nur die Figuren.
+// Strichfiguren: Seitenansicht, Blick nach rechts, Boden y = 100; je Übung zwei Posen (a = Start, b = Umkehrpunkt), Animation a → b → a per SVG-SMIL.
+// Posen über Gelenkpunkte (Hüfte, Rumpfrichtung, Fuß, Hand), Knie/Ellbogen rechnet wtIk() (aus plaene/training/figuren.mjs übernommen).
+const WT_KRAFT = '#ce93d8', WT_LAUF = '#fc5200';
+const WT_L = { ober: 23, unter: 23, rumpf: 30, kopf: 39, oa: 14, ua: 13, fuss: 7 };
+const wtAdd = (p, v, f = 1) => [p[0] + v[0] * f, p[1] + v[1] * f];
+const wtUnit = (v) => { const d = Math.hypot(v[0], v[1]) || 1; return [v[0] / d, v[1] / d]; };
+const wtGrad = (w) => (w * Math.PI) / 180;
+function wtIk(A, C, l1, l2, knick) {          // Zwei-Gelenk-Kette A → C; knick -1 = Knie nach vorn, +1 = Ellbogen nach hinten
+  const dx = C[0] - A[0], dy = C[1] - A[1];
+  const d = Math.min(Math.hypot(dx, dy), l1 + l2 - 0.01);
+  const a = Math.acos(Math.max(-1, Math.min(1, (l1 * l1 + d * d - l2 * l2) / (2 * l1 * d))));
+  const b = Math.atan2(dy, dx) + knick * a;
+  return [A[0] + l1 * Math.cos(b), A[1] + l1 * Math.sin(b)];
+}
+function wtGelenke(p) {
+  const hip = p.hip;
+  const dir = p.sh ? wtUnit([p.sh[0] - hip[0], p.sh[1] - hip[1]]) : [Math.sin(wtGrad(p.t || 0)), -Math.cos(wtGrad(p.t || 0))];
+  const sh = wtAdd(hip, dir, WT_L.rumpf), kopf = wtAdd(hip, dir, WT_L.kopf);
+  const beine = p.beine.map((b) => {
+    const knie = wtIk(hip, b.fuss, WT_L.ober, WT_L.unter, b.knick ?? -1);
+    const zeh = b.zeh || wtAdd(b.fuss, [Math.cos(wtGrad(b.zw || 0)), Math.sin(wtGrad(b.zw || 0))], WT_L.fuss);
+    return [hip, knie, b.fuss, zeh];
+  });
+  const arme = p.arme.map((a) => [sh, wtIk(sh, a.hand, WT_L.oa, WT_L.ua, a.knick ?? 1), a.hand]);
+  return { kopf, beine, arme, rumpf: [hip, sh], hanteln: p.arme.filter((a) => a.hantel).map((a) => a.hand), hantelHuefte: p.hantelHuefte ? hip : null };
+}
+const wtD = (pts) => pts.map((q, i) => `${i ? 'L' : 'M'}${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join(' ');
+const wtAnim = (attr, a, b, dur) => (a === b ? '' :
+  `<animate attributeName="${attr}" values="${a};${b};${a}" dur="${dur}s" repeatCount="indefinite" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45 0 0.55 1;0.45 0 0.55 1"/>`);
+const WT_STUFE_FARBE = 'fill="#2a2d33" stroke="#5f6368" stroke-width="1.2"';
+const WT_COUCH = (x0, x1, y) => `<rect x="${x0}" y="${y - 20}" width="8" height="${120 - y}" rx="3" ${WT_STUFE_FARBE}/><rect x="${x0}" y="${y}" width="${x1 - x0}" height="${100 - y - 4}" rx="3" fill="#30333a" stroke="#5f6368" stroke-width="1.2"/><line x1="${x0 + 3}" y1="96" x2="${x0 + 3}" y2="100" stroke="#5f6368" stroke-width="2"/><line x1="${x1 - 3}" y1="96" x2="${x1 - 3}" y2="100" stroke="#5f6368" stroke-width="2"/>`;
+const WT_TREPPE = (stufen, richtung = 'links') => `<path d="${richtung === 'links'
+  ? `M${stufen[0][1]} 100 ` + stufen.map(([y, , x0]) => `V${y} H${x0}`).join(' ') + ' V100 Z'
+  : `M${stufen[0][1]} 100 ` + stufen.map(([y, , x1]) => `V${y} H${x1}`).join(' ') + ' V100 Z'}" ${WT_STUFE_FARBE} stroke-linejoin="round"/>`;
+const WT_GELAENDER = (x0, y0, x1, y1) => `<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="#9aa0a6" stroke-width="2.2" stroke-linecap="round"/>`;
+const WT_WAND = (x) => `<rect x="${x - 6}" y="-12" width="6" height="112.5" fill="#24272c"/><line x1="${x}" y1="-12" x2="${x}" y2="100.5" stroke="#5f6368" stroke-width="1.5"/>`;
+// Posen je Übungs-ID (Phase 4 ergänzt B, C und das Aufwärmen)
+const WT_POSEN = {
+  bss: {
+    props: WT_COUCH(-6, 28, 76),
+    a: { hip: [52, 56], t: 8, beine: [{ fuss: [62, 96.5] }, { fuss: [24, 72.5], zw: 172 }], arme: [{ hand: [57, 52], hantel: 1 }, { hand: [55, 52], hantel: 1 }] },
+    b: { hip: [45, 72], t: 14, beine: [{ fuss: [62, 96.5] }, { fuss: [24, 72.5], zw: 172 }], arme: [{ hand: [53, 69], hantel: 1 }, { hand: [51, 69], hantel: 1 }] },
+  },
+  rdl: {
+    dur: 3.4,
+    a: { hip: [49, 55], t: 0, beine: [{ fuss: [50, 96.5] }, { fuss: [44, 93], zw: 10 }], arme: [{ hand: [52, 52], hantel: 1 }, { hand: [50, 52], hantel: 1 }] },
+    b: { hip: [44, 58], t: 80, beine: [{ fuss: [50, 96.5] }, { fuss: [2, 66], zw: 95 }], arme: [{ hand: [74, 78], hantel: 1 }, { hand: [72, 78], hantel: 1 }] },
+  },
+  peterson: {
+    props: WT_TREPPE([[84, 62, 22], [68, 22, -6]]),
+    a: { hip: [47, 38], t: 3, beine: [{ fuss: [48, 81] }, { fuss: [66, 78], zw: -10 }], arme: [{ hand: [74, 14] }, { hand: [72, 14] }] },
+    b: { hip: [52, 54], t: 12, beine: [{ fuss: [48, 81] }, { fuss: [76, 96], zw: -35 }], arme: [{ hand: [80, 30] }, { hand: [78, 30] }] },
+  },
+  bruecke: {
+    a: { hip: [52, 79], sh: [24, 92], beine: [{ fuss: [74, 96.5], zw: 0 }, { fuss: [91, 58], zw: -60, knick: -1 }], arme: [{ hand: [46, 98], knick: -1 }, { hand: [44, 98], knick: -1 }], hantelHuefte: 0 },
+    b: { hip: [48, 92], sh: [18, 93], beine: [{ fuss: [74, 96.5], zw: 0 }, { fuss: [88, 74], zw: -45, knick: -1 }], arme: [{ hand: [42, 98], knick: -1 }, { hand: [40, 98], knick: -1 }], hantelHuefte: 0 },
+  },
+  wallsit: {
+    dur: 2.4,
+    props: WT_WAND(18),
+    a: { hip: [26, 70], t: -2, beine: [{ fuss: [50, 92], zeh: [56, 98] }, { fuss: [48, 92], zeh: [54, 98] }], arme: [{ hand: [42, 67] }, { hand: [40, 67] }] },
+    b: { hip: [26, 70], t: -2, beine: [{ fuss: [50, 90], zeh: [56, 98] }, { fuss: [48, 90], zeh: [54, 98] }], arme: [{ hand: [42, 67] }, { hand: [40, 67] }] },
+  },
+  waden: {
+    dur: 2.6,
+    props: WT_TREPPE([[86, 55, 76], [72, 76, 106]], 'rechts') + WT_GELAENDER(64, 38, 106, 16),
+    a: { hip: [52, 43], t: 0, beine: [{ fuss: [51, 88.5], zeh: [58, 86] }, { fuss: [38, 68], knick: -1 }], arme: [{ hand: [84, 27] }, { hand: [55, 69], hantel: 1 }] },
+    b: { hip: [53, 33], t: 0, beine: [{ fuss: [53, 78], zeh: [58, 86] }, { fuss: [39, 58], knick: -1 }], arme: [{ hand: [84, 27] }, { hand: [56, 59], hantel: 1 }] },
+  },
+};
+// Figur als SVG-Text: wtFigur(id, { groesse, farbe, still: 'a'|'b' }); leer, wenn es für die Übung (noch) keine Posen gibt
+function wtFigur(id, o = {}) {
+  const u = WT_POSEN[id]; if (!u) return '';
+  const farbe = o.farbe || WT_KRAFT, fern = o.fern || '#7d5f86', dur = u.dur || 3;
+  const A = wtGelenke(u.a), B = wtGelenke(o.still ? (o.still === 'b' ? u.b : u.a) : u.b);
+  const P = o.still === 'b' ? B : A;
+  const linie = (pa, pb, c, w) => `<path d="${wtD(pa)}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${o.still ? '' : wtAnim('d', wtD(pa), wtD(pb), dur)}</path>`;
+  const kreis = (pa, pb, r, attrs) => `<circle cx="${pa[0].toFixed(1)}" cy="${pa[1].toFixed(1)}" r="${r}" ${attrs}>${o.still ? '' : wtAnim('cx', pa[0].toFixed(1), pb[0].toFixed(1), dur) + wtAnim('cy', pa[1].toFixed(1), pb[1].toFixed(1), dur)}</circle>`;
+  const hantel = (pa, pb) => kreis(pa, pb, 3.4, 'fill="#3a3d44" stroke="#9aa0a6" stroke-width="1.4"');
+  const g = (X, Y) => [
+    linie(X.beine[1], Y.beine[1], fern, 4.2), linie(X.arme[1], Y.arme[1], fern, 3.6),
+    linie(X.rumpf, Y.rumpf, farbe, 5), kreis(X.kopf, Y.kopf, 6.2, `fill="${farbe}"`),
+    linie(X.beine[0], Y.beine[0], farbe, 4.6), linie(X.arme[0], Y.arme[0], farbe, 4),
+    ...X.hanteln.map((h, k) => hantel(h, Y.hanteln[k])),
+    X.hantelHuefte ? hantel(wtAdd(X.hantelHuefte, [0, -5]), wtAdd(Y.hantelHuefte, [0, -5])) : '',
+  ].join('');
+  const s = o.groesse || 96;
+  return `<svg viewBox="-6 -14 112 118" width="${s}" height="${(s * 118 / 112).toFixed(1)}" style="display:block;overflow:visible">` +
+    `<line x1="-4" y1="100.5" x2="104" y2="100.5" stroke="#3c4043" stroke-width="1.5"/>${u.props || ''}${o.still ? g(P, P) : g(A, B)}</svg>`;
+}
+// Einheiten aus der Konfiguration der Ansicht „training“ (eine Quelle; Storage-Dashboards kennen keine YAML-Anker). Je Seite einmal geladen,
+// nach 1 h neu (Änderungen am Dashboard laden die Seite ohnehin neu).
+const wtQuelle = {};
+function wtEinheitenLaden(hass, dashboard, ansicht) {
+  const key = `${dashboard}/${ansicht}`, q = wtQuelle[key];
+  if (q && Date.now() - q.t < 3600000) return q.p;
+  const finde = (o) => {
+    if (!o || typeof o !== 'object') return null;
+    if (o.type === 'custom:wand-training' && o.einheiten) return o.einheiten;
+    for (const v of Object.values(o)) { const r = finde(v); if (r) return r; }
+    return null;
+  };
+  const p = hass.callWS({ type: 'lovelace/config', url_path: dashboard }).then((c) => {
+    const v = (c.views || []).find((x) => x.path === ansicht);
+    return v ? finde(v) : null;
+  }).catch(() => null);
+  wtQuelle[key] = { p, t: Date.now() };
+  p.then((r) => { if (!r) wtQuelle[key].t = Date.now() - 3540000; });      // ohne Ergebnis in 1 min noch einmal versuchen
+  return p;
+}
+const wtNavigieren = (pfad) => { history.pushState(null, '', pfad); window.dispatchEvent(new CustomEvent('location-changed', { detail: { replace: false } })); };
+const wtKurz = (u) => u.kurz || u.n;
+const wtNamen = (e) => [...new Set((e.uebungen || []).map(wtKurz))];
+const WT_CSS = `
+:host { display: block; }
+.k { position: relative; box-sizing: border-box; background: rgba(17,19,23,0.62); -webkit-backdrop-filter: blur(14px) saturate(1.15); backdrop-filter: blur(14px) saturate(1.15);
+  border: 1px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 12px 14px 14px; color: #e8eaed; font-family: var(--ha-font-family-body, Roboto, sans-serif);
+  cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.kopf { display: flex; align-items: center; gap: 12px; padding-right: 26px; }
+.sym { width: 38px; height: 38px; border-radius: 50%; background: rgba(206,147,216,0.2); display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.sym ha-icon { --mdc-icon-size: 22px; color: ${WT_KRAFT}; }
+.tt { min-width: 0; flex: 1; }
+.tt b { display: block; font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tt span { display: block; font-size: 12.5px; color: #a7acb4; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.weg { position: absolute; right: 6px; top: 8px; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; color: #8b9099; font-size: 18px; }
+.grund { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: #ffc58a; }
+.grund ha-icon { --mdc-icon-size: 17px; color: #ffb340; flex: none; }
+.ueb { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+.fig { flex: none; width: 44px; display: flex; justify-content: center; }
+.fig ha-icon { --mdc-icon-size: 30px; color: ${WT_KRAFT}; opacity: .9; }
+.namen { flex: 1; font-size: 12.5px; line-height: 1.5; color: #c4c7cc; }
+.kompakt .namen { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-left: 50px; }
+.rot { display: flex; gap: 5px; margin-top: 12px; }
+.rot span { flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px; padding: 6px 7px; border-radius: 10px; font-size: 12px; color: #a7acb4;
+  background: rgba(255,255,255,.05); border: 1px solid transparent; }
+.rot span.an { background: rgba(206,147,216,.18); border-color: rgba(206,147,216,.4); color: #f3e5f5; }
+.rot span b { font-size: 13px; }
+.rot span i { flex: 1; font-style: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rot ha-icon { --mdc-icon-size: 15px; color: #81c995; flex: none; }
+.soll { display: flex; gap: 6px; align-items: center; margin-top: 12px; font-size: 12.5px; color: #a7acb4; }
+.pl { width: 22px; height: 22px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; box-sizing: border-box;
+  background: rgba(255,255,255,.08); color: #7a7f87; }
+.zeile { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; }
+.zeile ha-icon { --mdc-icon-size: 18px; color: #a7acb4; flex: none; }
+.zeile small { color: #8b9099; font-size: 13px; }
+`;
+// Pille für das Wochen-Soll (Status ok | faellig | offen), Farbe Lauf orange, sonst Kraft-Lila
+const wtPille = (t, st) => {
+  const f = t === 'L' ? WT_LAUF : WT_KRAFT;
+  const s = st === 'ok' ? `background:${f};color:#111` : st === 'faellig' ? `border:1.5px solid ${f};color:${f};background:none` : '';
+  return `<span class="pl" style="${s}">${wrEsc(t)}</span>`;
+};
+class WandTraining extends HTMLElement {
+  setConfig(c) {
+    if (!c || !c.art) throw new Error('art fehlt (heute, plan)');
+    this._cfg = Object.assign({ entity: 'sensor.training_heute', test: 'input_boolean.wand_training_heute_test', ansicht: 'training', ziel: '', weg: 'script.training_heute_nicht', animation: 60 }, c);
+    this._sig = null;
+  }
+  getCardSize() { return this._cfg && this._cfg.art === 'plan' ? 8 : 3; }
+  getGridOptions() { return { columns: 12, min_columns: 6 }; }
+  set hass(h) {
+    this._hass = h;
+    const c = this._cfg, e = h && h.states[c.entity], t = h && h.states[c.test];
+    if (c.art === 'heute' && !this._einh && !this._laedt) {
+      this._laedt = true;
+      const dash = c.dashboard || location.pathname.split('/')[1] || 'home-new';
+      if (!c.ziel) c.ziel = `/${dash}/${c.ansicht}`;
+      const laden = () => wtEinheitenLaden(this._hass, dash, c.ansicht).then((r) => {
+        if (r) { this._einh = r; this._sig = null; this._render(); } else this._nochmal = setTimeout(laden, 65000);   // ohne Einheiten: Karte zeigt nur Kopf
+      });
+      laden();
+    }
+    const sig = [e ? e.state : '', e ? e.last_updated : '', t ? t.state : '', !!this._einh, this._kompakt].join('|');
+    if (sig === this._sig) return;
+    this._sig = sig;
+    this._render();
+  }
+  connectedCallback() { if (this._cfg && this._cfg.art === 'heute') requestAnimationFrame(() => this._stapelBeobachten()); }
+  disconnectedCallback() {
+    if (this._ro) { this._ro.disconnect(); this._ro = null; }
+    if (this._mo) { this._mo.disconnect(); this._mo = null; }
+    clearTimeout(this._still); clearTimeout(this._nochmal);
+    if (!this._einh) this._laedt = false;
+  }
+  _render() {
+    if (!this._cfg || !this._hass) return;
+    if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
+    if (this._cfg.art === 'plan') { this._plan(); return; }
+    if (this._cfg.art !== 'heute') { this.shadowRoot.innerHTML = `<div>Unbekannte Art „${wrEsc(this._cfg.art)}“</div>`; return; }
+    this._heute();
+  }
+
+  // ----- art: heute (Wand) -----
+  _heute() {
+    const h = this._hass, c = this._cfg, e = h.states[c.entity], d = (e && e.attributes.daten) || {};
+    const test = h.states[c.test] && h.states[c.test].state === 'on';
+    const z = e ? e.state : '';
+    const einheit = ['A', 'B', 'C'].includes(z) ? z : (test ? (d.kraft || (d.rotation || [])[0] || 'A') : '');
+    if (!einheit) { this.shadowRoot.innerHTML = ''; return; }
+    const E = (this._einh || {})[einheit] || {}, name = E.name || '';
+    const namen = wtNamen(E), anzahl = (E.uebungen || []).length;
+    const sonst = d.danach && d.danach.wann === 'heute' && d.danach.e ? d.danach.e : '';
+    const unter = [E.dauer ? `≈ ${E.dauer} min` : '', anzahl ? `${anzahl} Übungen` : '', sonst ? `sonst ${sonst}` : ''].filter(Boolean).join(' · ');
+    const kopf = `<div class="kopf"><span class="sym"><ha-icon icon="mdi:dumbbell"></ha-icon></span><div class="tt"><b>Heute dran: ${einheit}${name ? ` · ${wrEsc(name)}` : ''}</b><span>${unter}</span></div></div>`;
+    const weg = `<div class="weg" id="weg" role="button" aria-label="Heute nicht">✕</div>`;
+    let inhalt;
+    if (this._kompakt) inhalt = namen.length ? `<div class="namen" style="margin-top:6px">${namen.map(wrEsc).join(' · ')}</div>` : '';
+    else {
+      const figId = (E.figur && WT_POSEN[E.figur]) ? E.figur : ((E.uebungen || []).map((u) => u.id).find((i) => WT_POSEN[i]) || '');
+      const fig = figId ? wtFigur(figId, { groesse: 44 }) : `<ha-icon icon="${E.icon || 'mdi:dumbbell'}"></ha-icon>`;
+      inhalt = (d.grund ? `<div class="grund"><ha-icon icon="mdi:information-outline"></ha-icon><span>${wrEsc(d.grund)}</span></div>` : '') +
+        (namen.length ? `<div class="ueb"><div class="fig">${fig}</div><div class="namen">${namen.map(wrEsc).join(' · ')}</div></div>` : '');
+      if (d.modus === 'sommer') {
+        inhalt += `<div class="soll">Woche ${(d.woche || []).map((w) => wtPille(w.st === 'ok' ? w.e || w.s : w.s, w.st)).join('')}</div>`;
+      } else {
+        const ok = new Set((d.woche || []).filter((w) => w.st === 'ok').map((w) => w.e));
+        inhalt += `<div class="rot">${['A', 'B', 'C'].map((x) => {
+          const nm = ((this._einh || {})[x] || {}).name || '';
+          return `<span class="${x === einheit ? 'an' : ''}"><b>${x}</b><i>${wrEsc(nm.replace(/ \+ .*$/, ''))}</i>${ok.has(x) ? '<ha-icon icon="mdi:check-circle"></ha-icon>' : ''}</span>`;
+        }).join('')}</div>`;
+      }
+      inhalt += `<div class="zeile"><ha-icon icon="mdi:watch"></ha-icon><span>Watch: Funktionales Krafttraining<small> · zählt von selbst</small></span></div>`;
+    }
+    this.shadowRoot.innerHTML = `<style>${WT_CSS}</style><div class="k${this._kompakt ? ' kompakt' : ''}" id="k">${kopf}${weg}${inhalt}</div>`;
+    const k = this.shadowRoot.getElementById('k');
+    k.addEventListener('click', () => wtNavigieren(c.ziel || '/home-new/training'));
+    this.shadowRoot.getElementById('weg').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const [dom, srv] = c.weg.split('.');
+      h.callService(dom, srv, {});
+    });
+    // Animation nur eine Weile laufen lassen (Wand-iPad schonen), danach steht die Figur
+    clearTimeout(this._still);
+    const svg = this.shadowRoot.querySelector('.fig svg');
+    if (svg && c.animation > 0) this._still = setTimeout(() => { try { svg.pauseAnimations(); } catch (x) { /* egal */ } }, c.animation * 1000);
+    if (!this._kompakt) requestAnimationFrame(() => { const hh = this.offsetHeight; if (hh > 60) this._vollH = hh; this._stapelPruefen(); });
+    else requestAnimationFrame(() => this._stapelPruefen());
+  }
+  // Platz im linken Wand-Stapel (vertical-stack mit max-height): reicht er nicht für die volle Karte, kompakt zeigen (nur Kopf + Übungszeile).
+  // Gezählt werden alle anderen sichtbaren Karten des Stapels außer der letzten (Einkauf – die darf verschwinden).
+  _stapelFinden() {
+    let n = this;
+    for (let i = 0; i < 60 && n; i++) {
+      const p = n.parentNode;
+      if (!p) return null;
+      if (p instanceof ShadowRoot) { n = p.host; continue; }
+      if (p.id === 'root') { const host = p.getRootNode() && p.getRootNode().host; if (host && host.localName === 'hui-vertical-stack-card') return { root: p, ich: n }; }
+      n = p;
+    }
+    return null;
+  }
+  _stapelBeobachten() {
+    const s = this._stapelFinden(); if (!s || typeof ResizeObserver === 'undefined') return;
+    this._stapel = s;
+    const neu = () => { if (this._ro) this._ro.disconnect(); this._ro = new ResizeObserver(() => this._stapelPruefen()); [...s.root.children].forEach((x) => this._ro.observe(x)); };
+    neu();
+    this._mo = new MutationObserver(neu); this._mo.observe(s.root, { childList: true });
+    this._stapelPruefen();
+  }
+  _stapelPruefen() {
+    const s = this._stapel; if (!s) return;
+    const st = getComputedStyle(s.root), max = parseFloat(st.maxHeight);
+    if (!(max > 0)) return;
+    const gap = parseFloat(st.rowGap) || 10, kinder = [...s.root.children];
+    let summe = 0;
+    kinder.slice(0, -1).forEach((x) => { if (x !== s.ich && !s.ich.contains(x)) { const hh = x.offsetHeight; if (hh > 0) summe += hh + gap; } });
+    const kompakt = summe + (this._vollH || 235) > max;
+    if (kompakt !== !!this._kompakt) { this._kompakt = kompakt; this._sig = null; this._render(); }
+  }
+
+  // ----- art: plan (Unteransicht, vorläufig bis Phase 4) -----
+  _plan() {
+    const c = this._cfg, ein = c.einheiten || {}, e = this._hass.states[c.entity], z = e ? e.state : '';
+    const html = Object.entries(ein).map(([k, E]) => {
+      const auf = (E.aufwaermen || []).length ? `<div class="pa">Aufwärmen · ${(E.aufwaermen || []).map((u) => `${wrEsc(u.n)} <span>${wrEsc(u.dosis || '')}</span>`).join(' · ')}</div>` : '';
+      const paar = {}; (E.paare || []).forEach((p) => p.forEach((n) => { paar[n] = p.filter((m) => m !== n); }));
+      const ueb = (E.uebungen || []).map((u, i) => {
+        const fig = wtFigur(u.id, { groesse: 64 });
+        const zus = paar[i + 1] ? ` · im Wechsel mit ${paar[i + 1].join(', ')}` : '';
+        return `<div class="pu">${fig ? `<div class="pf">${fig}</div>` : `<div class="pf pn">${i + 1}</div>`}<div><b>${i + 1}. ${wrEsc(u.n)}</b><div class="pd">${wrEsc([u.dosis, u.last].filter(Boolean).join(' · '))}${zus}</div>` +
+          `${(u.tipps || []).length ? `<div class="pt">${u.tipps.map(wrEsc).join(' · ')}</div>` : ''}${u.steigern ? `<div class="pt">Steigern: ${wrEsc(u.steigern)}</div>` : ''}</div></div>`;
+      }).join('');
+      return `<div class="kopf"><ha-icon icon="${E.icon || 'mdi:dumbbell'}"></ha-icon><span class="t">${k} · ${wrEsc(E.name || '')}</span><span class="r">${z === k ? 'heute dran · ' : ''}≈ ${E.dauer || '?'} min</span></div>` +
+        `<ha-card>${E.runden ? `<div class="pa">${wrEsc(E.runden)}</div>` : ''}${auf}${ueb}</ha-card>`;
+    }).join('<div style="height:16px"></div>');
+    this.shadowRoot.innerHTML = `<style>${WS_CSS}
+      .pa { font-size: 13px; color: var(--secondary-text-color); margin-bottom: 12px; line-height: 1.5; }
+      .pa span { opacity: .8; }
+      .pu { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: start; }
+      .pu + .pu { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--divider-color, rgba(127,127,127,.2)); }
+      .pu b { font-size: 15px; }
+      .pf { border-radius: 10px; background: #1b1d20; padding: 4px 0; display: flex; justify-content: center; }
+      .pn { height: 56px; align-items: center; font-size: 20px; font-weight: 700; color: ${WT_KRAFT}; }
+      .pd { font-size: 13px; margin-top: 2px; }
+      .pt { font-size: 12.5px; color: var(--secondary-text-color); margin-top: 4px; line-height: 1.4; }
+    </style>${html || '<ha-card><div class="leer">Keine Einheiten konfiguriert (einheiten)</div></ha-card>'}`;
+  }
+}
+if (!customElements.get('wand-training')) customElements.define('wand-training', WandTraining);
+if (!window.customCards.some((c) => c.type === 'wand-training')) window.customCards.push({ type: 'wand-training', name: 'Wand-Training', description: 'Heute-Karte (Wand) und Übungen der Ansicht Training' });
