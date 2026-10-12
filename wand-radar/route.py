@@ -23,7 +23,7 @@ UA = {"User-Agent": "ha-wand-radar/0.3 (Home Assistant add-on)"}
 WAZE = "https://routing-livemap-row.waze.com/RoutingManager/routingRequest"
 OSRM = "https://router.project-osrm.org/route/v1/driving/"
 MOTIS = "https://api.transitous.org/api/"
-FENSTER = dt.timedelta(hours=3)        # Bahn: so früh vor der Abfahrt wird die Strecke schon geholt
+FENSTER = dt.timedelta(hours=5)        # Bahn: so früh vor der Abfahrt wird die Strecke schon geholt (Aufbruch-Karte bei Reisen ab 240 min vor „los“)
 VORAUS = dt.timedelta(hours=24)        # Auto: Termine so weit voraus bekommen die Fahrzeit ohne Verkehr (OSRM, kostenlos)
 VORLAUF = dt.timedelta(minutes=60)     # Auto: Verkehr ab so lange vor „los“ (dann zeigt die Wand die Aufbruch-Karte)
 T0_FAKTOR = 1.5                        # Auto: „los“ für den Fensterbeginn großzügig aus 1,5 × Fahrzeit ohne Verkehr schätzen

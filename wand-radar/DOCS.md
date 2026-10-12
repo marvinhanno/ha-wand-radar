@@ -52,7 +52,7 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
      Waze antwortet einfachen Clients seit 30.09.2026 mit 403; dann fragt die App wie pywaze 1.2.3 mit Chrome-Kennung (`curl_cffi`).
      Scheitert Waze, bleibt die letzte Route; gab es noch keine, zeigt die Karte die OSRM-Strecke („Strecke ohne Verkehr“), die
      HA-Helfer bleiben unverändert (Karte zeigt dann das Alter über `termin_fahrzeit_stand`).
-   - Bahn: bis 3 h vor der Abfahrt die Zugabschnitte aus dem Kalender der Option `route_calendar` (DB-Navigator-Format), Gleisverlauf von
+   - Bahn: ab 5 h vor der Abfahrt (seit 0.15.1, vorher 3 h) die Zugabschnitte aus dem Kalender der Option `route_calendar` (DB-Navigator-Format), Gleisverlauf von
      Transitous, dauerhaft in `/data/route` zwischengespeichert.
    - Sonst `{"aktiv": false}`. Fehler: alte Datei bleibt, Log `Route: …`, nach 5 min neuer Versuch.
 7. **Pause** (seit 0.6.0): Ist `pause_entity` gesetzt und `on` (z. B. nachts), holt und rechnet die App kein Radar und meldet den
