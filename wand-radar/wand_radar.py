@@ -3,6 +3,7 @@
 
 Ausgabe in output_dir:
   still.jpg   Karte + Radar "jetzt"
+  still_panel.jpg   dasselbe in klein für ein Bedienpanel (nur mit panel_width/panel_height, eigener Zoom möglich)
   radar.mp4   H.264, -past_minutes … +120 min, je 5-min-Schritt 4 berechnete Zwischenbilder
   meta.json   Zeiten, Verlauf am Zuhause-Punkt, Regenbeginn
 Dazu ein MQTT-Sensor "Wand-Radar Regen ab" (sensor.wand_radar_regen_ab).
@@ -46,7 +47,8 @@ def log(*a):
 def load_config():
     """Add-on-Optionen aus /data/options.json, lokal aus Umgebungsvariablen (WR_*)."""
     cfg = dict(zoom=9, width=1366, height=1024, past_minutes=60, fps=18, rain_threshold_dbz=14,
-               timezone="Europe/Berlin", preset="veryfast", output_dir="out", latitude=None, longitude=None)
+               timezone="Europe/Berlin", preset="veryfast", output_dir="out", latitude=None, longitude=None,
+               panel_width=0, panel_height=0, panel_zoom=0)
     if os.path.exists("/data/options.json"):
         cfg.update({k: v for k, v in json.load(open("/data/options.json")).items() if v is not None})
     for k in cfg:
@@ -216,8 +218,80 @@ def norm(d):
 
 
 # ---------- ein Durchlauf ----------
-def render(cfg, geo, t0, forecast, out_dir):
-    """forecast: {Minuten: hdf5-Bytes} von +0 bis +120. Schreibt still.jpg, radar.mp4, meta.json; gibt meta zurück."""
+class Scene:
+    """Bildausschnitt (Geo) gegen das DWD-Raster: Umprojektion, Grundkarte, Datenrand; compose() färbt ein Radarbild ein."""
+
+    def __init__(self, geo, where, cover):
+        W, H = geo.w, geo.h
+        # Umprojektion: Bildschirmpixel -> DWD-Raster
+        proj = where["projdef"].decode()
+        tr = Transformer.from_crs("EPSG:4326", proj, always_xy=True)
+        xul, yul = tr.transform(where["UL_lon"], where["UL_lat"])
+        ii, jj = np.meshgrid(np.arange(W) + 0.5 + geo.left, np.arange(H) + 0.5 + geo.top)
+        lon = ii / geo.world * 360 - 180
+        lat = np.degrees(np.arctan(np.sinh(math.pi * (1 - 2 * jj / geo.world))))
+        px, py = tr.transform(lon, lat)
+        col = (px - xul) / 1000 - 0.5
+        row = (yul - py) / 1000 - 0.5
+        self.c0, self.c1 = int(col.min()) - 40, int(col.max()) + 40      # Ausschnitt, damit Optical Flow schnell bleibt
+        self.r0, self.r1 = int(row.min()) - 40, int(row.max()) + 40
+        self.mapx = (col - self.c0).astype(np.float32)
+        self.mapy = (row - self.r0).astype(np.float32)
+
+        base, ref = geo.maps()
+        # Datenrand (z. B. IJsselmeer): Radar über ~10 km weich ausblenden, außerhalb die Karte leicht abdunkeln
+        cov = cv2.remap(cover[self.r0:self.r1, self.c0:self.c1].astype(np.float32), self.mapx, self.mapy, cv2.INTER_LINEAR, borderValue=0)
+        cov = cv2.GaussianBlur(cov, (0, 0), 18)
+        self.fade = np.clip(cov * 2 - 1, 0, 1)[..., None]
+        self.base = base * (0.75 + 0.25 * np.clip(cov * 2, 0, 1)[..., None])
+        hx, hy = tr.transform(geo.lon, geo.lat)
+        self.hc, self.hr = (hx - xul) / 1000 - 0.5 - self.c0, (yul - hy) / 1000 - 0.5 - self.r0
+
+        self.ref = ref
+        self.la = ref[..., 3:4] * 0.4                                # Ortsnamen ÜBER dem Radar
+        self.dry = (np.clip(self.base * (1 - self.la) + ref[..., :3] * self.la, 0, 1) * 255).astype(np.uint8)   # Karte ohne Regen
+        self.lut_rgb, self.lut_a = LUT[:, :3], LUT[:, 3:4] * 0.9
+
+    def crop(self, frames):
+        return [f[self.r0:self.r1, self.c0:self.c1] for f in frames]
+
+    def compose(self, dbz_crop):
+        """Nur Pixel mit Regen werden gerechnet, der Rest kommt fertig aus dry (spart auf schwachen Rechnern das meiste)."""
+        d = cv2.remap(dbz_crop, self.mapx, self.mapy, cv2.INTER_LINEAR, borderValue=-10)
+        ys, xs = np.nonzero(d > STOPS[0][0])
+        img = self.dry.copy()
+        if len(ys):
+            idx = np.clip(np.round((d[ys, xs] + 10) * 4), 0, 320).astype(np.int32)
+            a = self.lut_a[idx] * self.fade[ys, xs]
+            la = self.la[ys, xs]
+            out = (self.base[ys, xs] * (1 - a) + self.lut_rgb[idx] * a) * (1 - la) + self.ref[ys, xs, :3] * la
+            img[ys, xs] = (np.clip(out, 0, 1) * 255).astype(np.uint8)
+        return img
+
+
+def panel_geometry(cfg, lat, lon):
+    """Ausschnitt fürs kleine Panel-Standbild (Optionen panel_width/panel_height/panel_zoom); None = aus."""
+    w, h = int(cfg.get("panel_width") or 0), int(cfg.get("panel_height") or 0)
+    if w <= 0 or h <= 0:
+        return None
+    return Geo({**cfg, "width": w, "height": h, "zoom": int(cfg.get("panel_zoom") or cfg["zoom"])}, lat, lon)
+
+
+def render_panel_still(cfg, geo, where, cover, dbz_now, path):
+    """Nur das Standbild „jetzt“ für das Panel. Ein Fehler hier darf die Wand-Ausgabe nicht aufhalten."""
+    try:
+        t = time.time()
+        sc = Scene(geo, where, cover)
+        Image.fromarray(sc.compose(sc.crop([dbz_now])[0])).save(path, format="JPEG", quality=82, optimize=True)
+        log(f"Panel-Standbild {geo.w}×{geo.h}, Zoom {geo.z}: {time.time() - t:.1f} s, {os.path.getsize(path) // 1024} KB")
+        return True
+    except Exception as e:
+        log("Panel-Standbild fehlgeschlagen:", repr(e))
+        return False
+
+
+def render(cfg, geo, t0, forecast, out_dir, panel_geo=None):
+    """forecast: {Minuten: hdf5-Bytes} von +0 bis +120. Schreibt still.jpg, radar.mp4, meta.json (und still_panel.jpg, wenn panel_geo gesetzt); gibt meta zurück."""
     W, H = geo.w, geo.h
     tz = ZoneInfo(cfg["timezone"])
     n_past = cfg["past_minutes"] // STEP
@@ -242,46 +316,9 @@ def render(cfg, geo, t0, forecast, out_dir):
             frames[k] = src
     log(f"Bilder: {len(frames)}, {times[0]:%H:%M}Z … {times[-1]:%H:%M}Z")
 
-    # Umprojektion: Bildschirmpixel -> DWD-Raster
-    proj = where["projdef"].decode()
-    tr = Transformer.from_crs("EPSG:4326", proj, always_xy=True)
-    xul, yul = tr.transform(where["UL_lon"], where["UL_lat"])
-    ii, jj = np.meshgrid(np.arange(W) + 0.5 + geo.left, np.arange(H) + 0.5 + geo.top)
-    lon = ii / geo.world * 360 - 180
-    lat = np.degrees(np.arctan(np.sinh(math.pi * (1 - 2 * jj / geo.world))))
-    px, py = tr.transform(lon, lat)
-    col = (px - xul) / 1000 - 0.5
-    row = (yul - py) / 1000 - 0.5
-    c0, c1 = int(col.min()) - 40, int(col.max()) + 40      # Ausschnitt, damit Optical Flow schnell bleibt
-    r0, r1 = int(row.min()) - 40, int(row.max()) + 40
-    mapx = (col - c0).astype(np.float32)
-    mapy = (row - r0).astype(np.float32)
-    crop = [f[r0:r1, c0:c1] for f in frames]
-
-    base, ref = geo.maps()
-    # Datenrand (z. B. IJsselmeer): Radar über ~10 km weich ausblenden, außerhalb die Karte leicht abdunkeln
-    cov = cv2.remap(cover[r0:r1, c0:c1].astype(np.float32), mapx, mapy, cv2.INTER_LINEAR, borderValue=0)
-    cov = cv2.GaussianBlur(cov, (0, 0), 18)
-    fade = np.clip(cov * 2 - 1, 0, 1)[..., None]
-    base = base * (0.75 + 0.25 * np.clip(cov * 2, 0, 1)[..., None])
-    hx, hy = tr.transform(geo.lon, geo.lat)
-    hc, hr = (hx - xul) / 1000 - 0.5 - c0, (yul - hy) / 1000 - 0.5 - r0
-
-    la = ref[..., 3:4] * 0.4                                # Ortsnamen ÜBER dem Radar
-    dry = (np.clip(base * (1 - la) + ref[..., :3] * la, 0, 1) * 255).astype(np.uint8)   # Karte ohne Regen
-    lut_rgb, lut_a = LUT[:, :3], LUT[:, 3:4] * 0.9
-
-    def compose(dbz_crop):
-        """Nur Pixel mit Regen werden gerechnet, der Rest kommt fertig aus dry (spart auf schwachen Rechnern das meiste)."""
-        d = cv2.remap(dbz_crop, mapx, mapy, cv2.INTER_LINEAR, borderValue=-10)
-        ys, xs = np.nonzero(d > STOPS[0][0])
-        img = dry.copy()
-        if len(ys):
-            idx = np.clip(np.round((d[ys, xs] + 10) * 4), 0, 320).astype(np.int32)
-            a = lut_a[idx] * fade[ys, xs]
-            out = (base[ys, xs] * (1 - a) + lut_rgb[idx] * a) * (1 - la[ys, xs]) + ref[ys, xs, :3] * la[ys, xs]
-            img[ys, xs] = (np.clip(out, 0, 1) * 255).astype(np.uint8)
-        return img
+    sc = Scene(geo, where, cover)
+    crop = sc.crop(frames)
+    compose, hc, hr = sc.compose, sc.hc, sc.hr
 
     gx, gy = np.meshgrid(np.arange(crop[0].shape[1], dtype=np.float32), np.arange(crop[0].shape[0], dtype=np.float32))
 
@@ -299,6 +336,7 @@ def render(cfg, geo, t0, forecast, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     tmp = lambda name: os.path.join(out_dir, "." + name + ".tmp")
     Image.fromarray(compose(crop[now])).save(tmp("still.jpg"), format="JPEG", quality=88)
+    panel_still = render_panel_still(cfg, panel_geo, where, cover, frames[now], tmp("still_panel.jpg")) if panel_geo else False
 
     fps = cfg["fps"]
     ff = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
@@ -358,7 +396,7 @@ def render(cfg, geo, t0, forecast, out_dir):
         "summe_mm": round(sum(mmh[k] for k in rng) * STEP / 60, 2),
         "verlauf": mmh[now:now + 24],    # mm/h am Zuhause-Punkt ab jetzt, ein Wert je Schritt (STEP min)
     }
-    for name in ("still.jpg", "radar.mp4"):
+    for name in ("still.jpg", "radar.mp4") + (("still_panel.jpg",) if panel_still else ()):
         os.replace(tmp(name), os.path.join(out_dir, name))
     open(tmp("meta.json"), "w").write(json.dumps(meta, ensure_ascii=False))
     os.replace(tmp("meta.json"), os.path.join(out_dir, "meta.json"))    # zuletzt: Karte lädt erst danach neu
@@ -433,6 +471,7 @@ def main():
     if route.ha_available():
         route.start_thread(cfg, (lat, lon))          # eigener Thread, damit ein langer Radar-Durchlauf die Route nicht aufhält
     geo = Geo(cfg, lat, lon)
+    panel_geo = panel_geometry(cfg, lat, lon)
     publish_card(out_dir)
     mq = Mqtt()
     if "SUPERVISOR_TOKEN" in os.environ:
@@ -476,7 +515,7 @@ def main():
                     started = time.time()
                     store_past(cfg, t0, m[names[0]])
                     forecast = {int(n.split("_")[4][:3]): m[n] for n in names}
-                    meta = render(cfg, geo, t0, forecast, out_dir)
+                    meta = render(cfg, geo, t0, forecast, out_dir, panel_geo)
                     mq.publish(meta)
                     clean_past(cfg, t0)
                     last_t0 = t0
