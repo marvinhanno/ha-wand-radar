@@ -74,7 +74,7 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
 | `route_calendar` | leer | Kalender-Entität mit den Bahnreisen (`calendar.…`); leer = keine Bahnroute |
 | `route_presence` | leer | `binary_sensor` „jemand zu Hause“; aus = keine Verkehrsabfragen. Leer = immer abfragen |
 | `pause_entity` | leer | Entität, deren Zustand `on` das Radar pausieren lässt (z. B. nachts); leer = nie |
-| `panel_width`, `panel_height` | 0 (aus) | Größe eines zweiten, kleinen Standbilds `still_panel.jpg` (nur „jetzt“, gleiche Farben und Karte wie `still.jpg`, Mitte = dieselbe Kartenmitte) für ein kleines Bedienpanel, z. B. 600×720. Wird nur zusammen mit dem Standbild der Wand und nur bei einem neuen Radarlauf gerechnet (ein Bild, < 2 s), nicht als Video. 0 = es entsteht keine Datei |
+| `panel_width`, `panel_height` | 0 (aus) | Größe eines zweiten, kleinen Standbilds `still_panel.jpg` (nur „jetzt“, gleiche Farben und Karte wie `still.jpg`, Mitte = dieselbe Kartenmitte) für ein kleines Bedienpanel, z. B. 600×720. Wird nur zusammen mit dem Standbild der Wand und nur bei einem neuen Radarlauf gerechnet (ein Bild, < 2 s), nicht als Video. 0 = es entsteht keine Datei (eine vorhandene alte Datei wird dann gelöscht, ebenso nach einem Fehler beim Rechnen) |
 | `panel_zoom` | 0 | Kartenzoom des Panel-Standbilds; 0 = wie `zoom`. Ein kleinerer Wert zeigt ein größeres Gebiet (Zoom 8 bei 600 px ≈ 230 km breit) |
 
 Route lokal testen: `HA_URL`/`HA_TOKEN` setzen, `WR_ROUTE_JETZT=<ISO-Zeit>` und `WR_ROUTE_REISE=<JSON wie wand_reise>` simulieren Zeit und Reise, `python wand-radar/wand_radar.py --route-once`.

@@ -287,6 +287,10 @@ def render_panel_still(cfg, geo, where, cover, dbz_now, path):
         return True
     except Exception as e:
         log("Panel-Standbild fehlgeschlagen:", repr(e))
+        try:
+            os.remove(path)
+        except OSError:
+            pass
         return False
 
 
@@ -398,6 +402,11 @@ def render(cfg, geo, t0, forecast, out_dir, panel_geo=None):
     }
     for name in ("still.jpg", "radar.mp4") + (("still_panel.jpg",) if panel_still else ()):
         os.replace(tmp(name), os.path.join(out_dir, name))
+    if not panel_still:      # Option aus oder Fehler: ein altes Panel-Bild darf nicht unter neuen Zeiten stehen bleiben
+        try:
+            os.remove(os.path.join(out_dir, "still_panel.jpg"))
+        except OSError:
+            pass
     open(tmp("meta.json"), "w").write(json.dumps(meta, ensure_ascii=False))
     os.replace(tmp("meta.json"), os.path.join(out_dir, "meta.json"))    # zuletzt: Karte lädt erst danach neu
     return meta
