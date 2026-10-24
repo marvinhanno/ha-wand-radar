@@ -1,11 +1,14 @@
-// wand-radar 1.15 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.16 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
 //   „Jetzt“ → Ruhe. 60 s nach der letzten Berührung → Ruhe.
 // - Setzt --wand-seiten (1/0), --wand-seiten-x (0/1), --wand-seiten-pe (auto/none) auf <html>; die übrigen Karten
 //   blenden damit beim Abspielen aus (vererbt sich durch Shadow-DOM, iOS 16 kann kein :host-context).
-// - Aufwach-Erkennung wie in wand-radar-play 1.2 (War die Seite > 20 min eingefroren → neu laden, sobald HA erreichbar ist).
+// - Aufwachen (seit 1.16, vorher: > 20 min eingefroren → immer neu laden): Kommt die Seite aus dem Hintergrund oder war sie eingefroren,
+//   holen alle Karten sofort meta.json/route.json. Neu geladen wird nur noch, wenn HA sich nach 60 s nicht zurückgemeldet hat
+//   (kein neues hass mit connected) oder sich die HA-Version geändert hat (Update → neues Frontend). Den Rest macht HA selbst
+//   (Verbindung neu, Zustände, Dashboard neu aufbauen). Jeder Neuladen steht im Logbuch „Wand-Radar“.
 // - Routenmodus (seit 1.4): Steht links die Aufbruch-Karte (sensor.wand_aufbruch_quelle = termin/reise) und die App hat route.json
 //   geschrieben, zeichnet die Karte statt des Radars die Route (Esri-Kacheln + SVG). Umschalter „Route | Radar“ unten rechts.
 //   Setzt --wand-mitte (1/0) auf <html>, damit die Wetterkarte in der Mitte ausblendet.
@@ -25,15 +28,21 @@
 //   art: heute zählt für die Kompakt-Regel die Bedingungs-Karten aus stapel_optional („entity=zustand“) nicht mit.
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
-const WAND_WAKE_GAP = 20 * 60 * 1000;
+const WAND_WAKE_GAP = 90 * 1000;       // Takt (30 s) so lange ausgeblieben → Seite war eingefroren
+const WAND_WAKE_CHECK = 60 * 1000;     // so lange darf HA nach dem Aufwachen brauchen, bis neu geladen wird
+const WAND_KARTEN = new Set();         // verbundene wand-radar-Karten
+let wandHass = null, wandHassT = 0, wandHaVersion = '';
 function wandSeiten(playing) {
   const s = document.documentElement.style;
   s.setProperty('--wand-seiten', playing ? '0' : '1');
   s.setProperty('--wand-seiten-x', playing ? '1' : '0');
   s.setProperty('--wand-seiten-pe', playing ? 'none' : 'auto');
 }
-function wandReload(btn) {
+// Grund des Neuladens fürs Logbuch „Wand-Radar“: wird erst nach dem Laden geschrieben (vorher fehlt oft gerade die Verbindung).
+const wandMerk = (v) => { try { if (v === undefined) return sessionStorage.getItem('wandNeuGrund'); sessionStorage.setItem('wandNeuGrund', v); } catch (e) { /* ohne Speicher */ } return null; };
+function wandReload(btn, grund) {
   if (window.__wandReloading) return;
+  if (grund) wandMerk(grund);
   window.__wandReloading = true;
   if (btn) btn.classList.add('busy');
   let n = 0;
@@ -67,20 +76,47 @@ function wandStapelZurueck(sek) {
   };
   lauf(document.body);
 }
+// Jedes hass, das eine Karte bekommt (HA schickt bei jeder Zustandsänderung ein neues). Ändert sich die HA-Version, läuft
+// noch das alte Frontend → neu laden.
+function wandHassGesehen(h) {
+  if (!h || h === wandHass) return;
+  wandHass = h; wandHassT = Date.now();
+  const grund = h.connected && wandMerk();
+  if (grund) {
+    wandMerk('');
+    Promise.resolve().then(() => h.callService('logbook', 'log', { name: 'Wand-Radar', message: 'Neu geladen: ' + grund }, undefined, false)).catch(() => {});
+  }
+  const v = h.config && h.config.version;
+  if (!v) return;
+  if (!wandHaVersion) wandHaVersion = v;
+  else if (v !== wandHaVersion) wandReload(null, `HA ${wandHaVersion} → ${v}, lade neu`);
+}
 if (!window.__wandWatchdog) {
   window.__wandWatchdog = true;
   window.__wandActive = 0;
-  let last = Date.now();
-  let hiddenAt = 0;
-  const wake = () => { if (window.__wandActive > 0) wandReload(null); };
+  let last = Date.now(), hiddenAt = 0, pruefT = 0, wachT = 0;
+  const wake = (grund) => {
+    if (!(window.__wandActive > 0) || Date.now() - wachT < 10000) return;
+    const t0 = wachT = Date.now();
+    WAND_KARTEN.forEach((k) => k._frisch());
+    clearInterval(pruefT);
+    pruefT = setInterval(() => {
+      if (document.hidden || window.__wandReloading || !(window.__wandActive > 0)) { clearInterval(pruefT); return; }
+      if (wandHassT > t0 && wandHass && wandHass.connected) { clearInterval(pruefT); return; }   // HA hat sich zurückgemeldet
+      if (Date.now() - t0 >= WAND_WAKE_CHECK) {
+        clearInterval(pruefT);
+        wandReload(null, `Aufwachen (${grund}): HA nach ${WAND_WAKE_CHECK / 1000} s nicht zurück, lade neu`);
+      }
+    }, 5000);
+  };
   setInterval(() => {
     const now = Date.now();
-    if (now - last > WAND_WAKE_GAP) wake();
+    if (now - last > WAND_WAKE_GAP) wake(`${Math.round((now - last) / 60000)} min eingefroren`);
     last = now;
   }, 30000);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { hiddenAt = Date.now(); return; }
-    if (hiddenAt && Date.now() - hiddenAt > WAND_WAKE_GAP) wake();
+    if (document.hidden) { hiddenAt = Date.now(); clearInterval(pruefT); return; }
+    if (hiddenAt) wake(`${Math.round((Date.now() - hiddenAt) / 60000)} min verborgen`);
     hiddenAt = 0;
   });
 }
@@ -310,6 +346,7 @@ class WandRadar extends HTMLElement {
   }
   set hass(h) {
     this._hass = h;
+    wandHassGesehen(h);
     const sig = WR_ROUTE_STATES.map((e) => (h && h.states[e] ? h.states[e].state : '')).join('|');
     const t = h && h.states[this._cfg.training_entity], z = h && h.states[this._cfg.training_show];
     const a = t ? t.attributes || {} : {};
@@ -357,6 +394,7 @@ class WandRadar extends HTMLElement {
       this._state = 'ruhe';
     }
     window.__wandActive = (window.__wandActive || 0) + 1;
+    WAND_KARTEN.add(this);
     wandSeiten(false);
     this._loadMeta();
     this._loadRoute();
@@ -368,7 +406,9 @@ class WandRadar extends HTMLElement {
     clearInterval(this._poll); clearTimeout(this._stapelT); clearTimeout(this._auto); clearTimeout(this._holdT); clearTimeout(this._rauto); wandSeiten(false);
     document.documentElement.style.setProperty('--wand-mitte', '1');
     window.__wandActive = Math.max(0, (window.__wandActive || 1) - 1);
+    WAND_KARTEN.delete(this);
   }
+  _frisch() { this._loadMeta(); this._loadRoute(); }   // nach dem Aufwachen sofort, nicht erst beim nächsten 60-s-Takt
 
   _buildLegend() {
     const lo = 12, hi = 60, st = [], lg = this._$('lg');
