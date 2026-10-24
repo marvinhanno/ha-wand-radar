@@ -27,6 +27,7 @@ import requests
 from PIL import Image
 from pyproj import Transformer
 
+import archiv
 import route
 
 DWD = "https://opendata.dwd.de/weather/radar/composite/wn/"
@@ -48,13 +49,13 @@ def load_config():
     """Add-on-Optionen aus /data/options.json, lokal aus Umgebungsvariablen (WR_*)."""
     cfg = dict(zoom=9, width=1366, height=1024, past_minutes=60, fps=18, rain_threshold_dbz=14,
                timezone="Europe/Berlin", preset="veryfast", output_dir="out", latitude=None, longitude=None,
-               panel_width=0, panel_height=0, panel_zoom=0)
+               panel_width=0, panel_height=0, panel_zoom=0, archiv_tage=0, prognose_test=False)
     if os.path.exists("/data/options.json"):
         cfg.update({k: v for k, v in json.load(open("/data/options.json")).items() if v is not None})
     for k in cfg:
         env = os.environ.get("WR_" + k.upper())
         if env:
-            cfg[k] = type(cfg[k])(env) if cfg[k] is not None else float(env)
+            cfg[k] = (env.lower() in ("1", "true", "ja")) if isinstance(cfg[k], bool) else type(cfg[k])(env) if cfg[k] is not None else float(env)
     cfg["data_dir"] = os.environ.get("WR_DATA_DIR", "/data" if os.path.isdir("/data") else "cache")
     return cfg
 
@@ -482,6 +483,7 @@ def main():
     geo = Geo(cfg, lat, lon)
     panel_geo = panel_geometry(cfg, lat, lon)
     publish_card(out_dir)
+    arch = archiv.start(cfg, (lat, lon), read_h5, log)     # nur Messphase der eigenen Vorhersage (archiv_tage, prognose_test)
     mq = Mqtt()
     if "SUPERVISOR_TOKEN" in os.environ:
         try:
@@ -526,6 +528,8 @@ def main():
                     forecast = {int(n.split("_")[4][:3]): m[n] for n in names}
                     meta = render(cfg, geo, t0, forecast, out_dir, panel_geo)
                     mq.publish(meta)
+                    if arch:
+                        arch.neuer_lauf(t0, forecast)
                     clean_past(cfg, t0)
                     last_t0 = t0
                     log(f"fertig in {time.time() - started:.0f} s: Lauf {meta['t0']}, Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")

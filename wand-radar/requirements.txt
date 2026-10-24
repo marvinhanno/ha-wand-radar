@@ -8,3 +8,4 @@ requests
 paho-mqtt>=2
 tzdata
 curl_cffi
+eccodes

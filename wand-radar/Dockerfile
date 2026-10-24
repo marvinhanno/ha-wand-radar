@@ -5,6 +5,6 @@ ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY wand_radar.py route.py wand-radar-card.js ./
+COPY wand_radar.py route.py archiv.py prognose.py wand-radar-card.js ./
 
 CMD ["python", "/app/wand_radar.py"]
