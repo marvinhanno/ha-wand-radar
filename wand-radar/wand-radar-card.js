@@ -1,4 +1,4 @@
-// wand-radar 1.16 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.17 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -1265,6 +1265,20 @@ const WT_CSS = `
 .bar.g { background: rgba(252,82,0,0.22); box-shadow: inset 0 0 0 1px rgba(252,82,0,0.55); }
 .bar div { width: 100%; background: #4fc3f7; border-radius: 3px; }
 `;
+// art zeile: Höhe wie eine Chip-Reihe der Hinweis-Spalte, blendet beim Radar-Abspielen aus wie die Chips (--wand-seiten*)
+const WT_ZEILE_CSS = `
+:host { display: block; margin-top: 4px; opacity: var(--wand-seiten, 1); transform: translateX(calc(var(--wand-seiten-x, 0) * 36px));
+  transition: opacity .5s ease, transform .5s ease; pointer-events: var(--wand-seiten-pe, auto); }
+.k { height: 48px; box-sizing: border-box; border-radius: 16px; background: rgba(30,31,35,.92); display: flex; align-items: center; gap: 10px; padding: 0 14px;
+  font-family: var(--ha-font-family-body, Roboto, -apple-system, sans-serif); font-size: 14px; color: #e8eaed; -webkit-tap-highlight-color: transparent; }
+.plan { display: flex; gap: 6px; flex: none; cursor: pointer; }
+.pl { width: 26px; height: 26px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700;
+  box-sizing: border-box; background: #2c2d31; color: #6b6e75; flex: none; }
+.wo { margin-left: auto; min-width: 0; display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+.wo ha-icon { --mdc-icon-size: 19px; color: ${WT_LAUF}; flex: none; }
+.wo b { font-weight: 600; flex: none; }
+.wo span { font-weight: 500; color: #a7acb4; overflow: hidden; text-overflow: ellipsis; }
+`;
 // Pille für das Wochen-Soll (Status ok | faellig | offen), Farbe Lauf orange, sonst Kraft-Lila
 const wtPille = (t, st) => {
   const f = t === 'L' ? WT_LAUF : WT_KRAFT;
@@ -1280,7 +1294,7 @@ const wtLaufMorgen = (lw) => {
   return `<div class="zeile"><ha-icon icon="mdi:run" style="color:${WT_LAUF}"></ha-icon><span>Lauf lieber ${wd === 6 ? 'Sonntag' : 'morgen'}<small> · ${wann}</small></span></div>`;
 };
 // ----- Ansicht „Training“ (seit 1.12): gemeinsame Auswahl, Datum/ISO-Woche, Timer, Ton, Wake-Lock, Rückfragen -----
-const WT_ARTEN = ['heute', 'naechste', 'einheit', 'saison'];
+const WT_ARTEN = ['heute', 'naechste', 'einheit', 'saison', 'zeile'];
 const wtWahl = { e: '' };                     // in der Ansicht angetippte Einheit (leer = Vorschlag des Motors); gilt für naechste + einheit
 const wtWaehlen = (e) => { wtWahl.e = e; window.dispatchEvent(new CustomEvent('wand-training-wahl')); };
 const wtVorschlag = (z, d) => (['A', 'B', 'C'].includes(z) ? z : d.kraft || (d.rotation || [])[0] || 'A');
@@ -1892,7 +1906,7 @@ class WandTraining extends HTMLElement {
     this._vollH = {};
     if (c.einheiten) this._einh = c.einheiten;
   }
-  getCardSize() { return { einheit: 12, naechste: 5, saison: 6 }[this._cfg && this._cfg.art] || 3; }
+  getCardSize() { return { einheit: 12, naechste: 5, saison: 6, zeile: 1 }[this._cfg && this._cfg.art] || 3; }
   getGridOptions() { return { columns: this._cfg && this._cfg.art !== 'heute' ? 'full' : 12, min_columns: 6 }; }      // full: einheit füllt auch einen Abschnitt mit column_span 2
   set hass(h) {
     this._hass = h;
@@ -1911,6 +1925,7 @@ class WandTraining extends HTMLElement {
     if (c.art === 'heute') sig = [e ? e.state : '', e ? e.last_updated : '', t ? t.state : '', w ? w.last_updated : '', !!this._einh, this._kompakt].join('|');
     else if (c.art === 'naechste') sig = [lu(c.entity), lu(c.stand), lu(c.modus), lu(c.laeuft), wtWahl.e, !!this._einh, wsHeute()].join('|');
     else if (c.art === 'einheit') sig = [e ? e.state : '', e && e.attributes.daten ? e.attributes.daten.kraft : '', wtWahl.e].join('|');
+    else if (c.art === 'zeile') sig = [e ? e.last_updated : '', h && h.states[c.strava] ? h.states[c.strava].last_updated : ''].join('|');
     else sig = [lu(c.entity), lu(c.stand), h && h.states[c.strava] ? h.states[c.strava].last_updated : '', wsHeute()].join('|');
     if (sig === this._sig) return;
     this._sig = sig;
@@ -1951,6 +1966,7 @@ class WandTraining extends HTMLElement {
     if (art === 'heute') this._heute();
     else if (art === 'naechste') this._naechste();
     else if (art === 'einheit') this._einheit();
+    else if (art === 'zeile') this._zeile();
     else this._saison();
   }
 
@@ -2322,6 +2338,24 @@ class WandTraining extends HTMLElement {
       R.querySelectorAll('.pw').forEach((el) => el.classList.toggle('an', !!p && +el.dataset.p === p.dauer));
       if (vorbei) { clearTimeout(this._weiter); this._weiter = setTimeout(() => this._uhrZeigen(), 5100); }
     }
+  }
+
+  // ----- art: zeile (seit 1.17) – Wand, rechte Spalte: Wochen-Soll als Pillen (→ Training) und Strava-Woche (→ Sport) in einer Zeile.
+  // Ersetzt die Sport-Chips des Hinweis-Motors (ID sport); leer, wenn weder eine Plan-Einheit erledigt ist noch eine Aktivität da ist.
+  _zeile() {
+    const h = this._hass, c = this._cfg, e = h.states[c.entity], d = (e && e.attributes.daten) || {};
+    const s = h.states[c.strava], g = ((s && s.attributes.woche) || {}).gesamt || {};
+    const plan = !d.pause && (d.woche || []).some((w) => w.st === 'ok');
+    const n = Number(s && s.state) || 0, km = Number(g.km) || 0, min = Math.round(Number(g.min) || 0);
+    if (!plan && n < 1) { this.shadowRoot.innerHTML = ''; return; }
+    const dauer = min < 60 ? `${min} min` : `${Math.floor(min / 60)}:${pad(min % 60)} h`;
+    const links = plan ? `<div class="plan" id="pl">${(d.woche || []).map((w) => wtPille(w.st === 'ok' ? w.e || w.s : w.s, w.st)).join('')}</div>` : '';
+    const rechts = n >= 1 ? `<div class="wo" id="wo"><ha-icon icon="mdi:run"></ha-icon><b>${km > 0 ? `${km.toFixed(1).replace('.', ',')} km` : `${g.n || n}× aktiv`}</b>${min ? `<span>· ${dauer}</span>` : ''}</div>` : '';
+    this.shadowRoot.innerHTML = `<style>${WT_ZEILE_CSS}</style><div class="k">${links}${rechts}</div>`;
+    const dash = c.dashboard || location.pathname.split('/')[1] || 'home-new';
+    const pl = this.shadowRoot.getElementById('pl'), wo = this.shadowRoot.getElementById('wo');
+    if (pl) pl.addEventListener('click', () => wtNavigieren(`/${dash}/${c.ansicht}`));
+    if (wo) wo.addEventListener('click', () => wtNavigieren(`/${dash}/sport`));
   }
 
   // ----- art: saison – Soll/Ist je ISO-Woche (Kraft/Stabi + Modus/Pause aus sensor.training_stand, Läufe aus strava_stats.liste) -----
