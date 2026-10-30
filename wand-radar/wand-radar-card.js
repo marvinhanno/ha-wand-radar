@@ -1,4 +1,4 @@
-// wand-radar 1.17 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.18 (Routen- und Trainingsmodus, Elemente für die Ansichten „Sport“ und „Training“) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -26,7 +26,10 @@
 //   seit 1.14 Ende des geführten Modus mit „Ohne Watch trainiert? Als erledigt eintragen“ (→ script.training_erledigt, wie in art: naechste).
 // - Linke Spalte (seit 1.15): Der Stapel scrollt (card_mod); custom:wand-radar holt ihn nach stapel_sekunden (60) ohne Berührung zurück nach oben.
 //   art: heute zählt für die Kompakt-Regel die Bedingungs-Karten aus stapel_optional („entity=zustand“) nicht mit.
-// Konfiguration: type: custom:wand-radar, base: /local/wand-radar, max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
+// - Haken für andere Karten (seit 1.18): (1) Das Fensterereignis „wand-radar-abspielen“ startet ▶ wie der eigene Knopf (nur die sichtbare Karte mit Radar-Daten
+//   reagiert; zeigt sie gerade Route/Training, schaltet sie erst aufs Radar). (2) Marke „Regen hh:mm“ auf der Zeitleiste an der Regenzeit aus regen_entity
+//   (Standard sensor.wand_radar_regen_ab, Zustand = Zeitstempel), nur wenn der Regen in < 2 h kommt und es noch nicht regnet; sie ersetzt dann die Flagge „Regen ab“.
+// Konfiguration: type: custom:wand-radar, base: /local/wand-radar, regen_entity: sensor.wand_radar_regen_ab, max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
 //   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
 const WAND_WAKE_GAP = 90 * 1000;       // Takt (30 s) so lange ausgeblieben → Seite war eingefroren
 const WAND_WAKE_CHECK = 60 * 1000;     // so lange darf HA nach dem Aufwachen brauchen, bis neu geladen wird
@@ -192,6 +195,15 @@ const WR_CSS = `
   .flag::before { content: ''; width: 2px; height: 14px; background: #5ac8fa; border-radius: 1px; transform: translateY(5px); }
   .flag.on { display: flex; }
   .flag.right { transform: translateX(calc(-100% + 2px)); flex-direction: row-reverse; }
+  .rmk.on ~ .flag.ab { display: none; }
+  .rmk { position: absolute; top: 0; width: 0; height: 0; display: none; pointer-events: none; }
+  .rmk.on { display: block; }
+  .rmk .st { position: absolute; left: -1.5px; top: 3px; width: 3px; height: 18px; border-radius: 2px; background: #5ab0ff; }
+  .rmk .sc { position: absolute; left: 0; top: -17px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; white-space: nowrap;
+    height: 20px; padding: 0 8px 0 5px; border-radius: 10px; background: rgba(12,14,17,.85); border: 1px solid rgba(90,176,255,.5);
+    font-size: 12px; font-weight: 600; color: #9fd0ff; font-variant-numeric: tabular-nums; }
+  .rmk .sc ha-icon { --mdc-icon-size: 14px; color: #5ab0ff; }
+  .rmk.r .sc { transform: translateX(calc(-100% + 14px)); }
   .jetzt { position: absolute; left: 480px; top: 0; height: 40px; padding: 0 16px 0 12px; border-radius: 20px; border: 1px solid rgba(255,255,255,.12);
     background: rgba(17,19,23,.8); color: #d4d7dc; font: 600 13px Roboto, sans-serif; display: flex; align-items: center; gap: 6px; cursor: pointer;
     opacity: 0; pointer-events: none; transition: opacity .2s; }
@@ -248,6 +260,7 @@ const WR_HTML = `<div id="root">
     <div class="track" id="track">
       <div class="rail"><div class="past" id="past"></div><div class="fut" id="fut"></div><div class="fill" id="fill"></div><canvas class="rainstrip" id="strip"></canvas></div>
       <div class="ticks" id="ticks"></div>
+      <div class="rmk" id="rmk"><i class="st"></i><span class="sc"><ha-icon icon="mdi:weather-rainy"></ha-icon><b id="rmkT"></b></span></div>
       <div class="flag" id="flag"></div>
       <div class="now" id="now"></div>
       <div class="head" id="head"></div>
@@ -341,7 +354,7 @@ function wrTempo(typ, km, min, pace) {       // Anzeige-Tempo je Sportart; leer,
 
 class WandRadar extends HTMLElement {
   setConfig(c) {
-    this._cfg = Object.assign({ base: '/local/wand-radar', max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
+    this._cfg = Object.assign({ base: '/local/wand-radar', regen_entity: 'sensor.wand_radar_regen_ab', max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
       training_entity: 'sensor.strava_latest_activity', training_show: 'binary_sensor.wand_training_zeigen' }, c || {});
   }
   set hass(h) {
@@ -352,6 +365,8 @@ class WandRadar extends HTMLElement {
     const a = t ? t.attributes || {} : {};
     const tsig = [z ? z.state : '', t ? t.state : '', a.source_id, a.name, a.distance_km, a.duration_minutes, (a.summary_polyline || '').length].join('|');
     if (sig !== this._rsig || tsig !== this._tsig) { this._rsig = sig; this._tsig = tsig; if (this._$) this._sync(); }
+    const rg = h && h.states[this._cfg.regen_entity], rsig = rg ? `${rg.state}|${(rg.attributes || {}).regnet_jetzt}` : '';
+    if (rsig !== this._regsig) { this._regsig = rsig; if (this._$) this._marke(); }
   }
   getCardSize() { return 1; }
 
@@ -393,6 +408,8 @@ class WandRadar extends HTMLElement {
       }
       this._state = 'ruhe';
     }
+    this._onAbspielen = this._onAbspielen || ((e) => this._abspielenEreignis(e));
+    window.addEventListener('wand-radar-abspielen', this._onAbspielen);
     window.__wandActive = (window.__wandActive || 0) + 1;
     WAND_KARTEN.add(this);
     wandSeiten(false);
@@ -400,9 +417,10 @@ class WandRadar extends HTMLElement {
     this._loadRoute();
     this._sync();
     clearTimeout(this._stapelT); this._stapelT = setTimeout(() => wandStapelZurueck(this._cfg.stapel_sekunden), 3000);
-    this._poll = setInterval(() => { this._loadMeta(); this._loadRoute(); wandStapelZurueck(this._cfg.stapel_sekunden); }, 60000);
+    this._poll = setInterval(() => { this._loadMeta(); this._loadRoute(); this._marke(); wandStapelZurueck(this._cfg.stapel_sekunden); }, 60000);
   }
   disconnectedCallback() {
+    window.removeEventListener('wand-radar-abspielen', this._onAbspielen);
     clearInterval(this._poll); clearTimeout(this._stapelT); clearTimeout(this._auto); clearTimeout(this._holdT); clearTimeout(this._rauto); wandSeiten(false);
     document.documentElement.style.setProperty('--wand-mitte', '1');
     window.__wandActive = Math.max(0, (window.__wandActive || 1) - 1);
@@ -463,9 +481,34 @@ class WandRadar extends HTMLElement {
     const f = this._$('flag');
     const ab = m.regnet_jetzt ? -1 : m.times.findIndex((t, i) => i > m.now_index && s[i] >= thr && s[i - 1] < thr);
     const bis = m.regnet_jetzt && m.regen_bis ? m.times.indexOf(m.regen_bis, m.now_index) : -1;
-    f.classList.remove('on', 'right');
+    f.classList.remove('on', 'right'); f.classList.toggle('ab', ab >= 0);
     if (ab >= 0) { f.classList.add('on'); f.style.left = (ab / span * 100) + '%'; f.textContent = `Regen ab ${m.times[ab]}`; }
     else if (bis >= 0) { f.classList.add('on'); f.style.left = (bis / span * 100) + '%'; f.textContent = `Regen bis ${m.times[bis]}`; }
+    this._marke();
+  }
+  // Marke „Regen hh:mm“ (seit 1.18): Regenbeginn aus regen_entity, nur wenn er in < 2 h kommt, es nicht regnet und er auf der Zeitleiste liegt
+  _marke() {
+    const m = this._meta, k = this._$ && this._$('rmk'); if (!k) return;
+    let on = false;
+    const e = this._hass && this._hass.states[this._cfg.regen_entity];
+    if (m && m.epochs && e && e.state !== 'unavailable' && e.state !== 'unknown' && !/^(true|on)$/i.test(String((e.attributes || {}).regnet_jetzt))) {
+      const t = new Date(e.state).getTime(), dt = t - Date.now(), e0 = m.epochs[0] * 1000, e1 = m.epochs[m.epochs.length - 1] * 1000;
+      const p = (t - e0) / (e1 - e0);
+      if (!isNaN(t) && dt > 0 && dt < 2 * 3600 * 1000 && p >= 0 && p <= 1) {
+        on = true;
+        k.style.left = (p * 100) + '%'; k.classList.toggle('r', p > 0.93);
+        this._$('rmkT').textContent = `Regen ${wrHM(new Date(t))}`;
+      }
+    }
+    k.classList.toggle('on', on);
+  }
+  // Ereignis „wand-radar-abspielen“ (seit 1.18): startet ▶ wie der eigene Knopf – nur die Karte, die ein Radar zeigen kann und sichtbar ist
+  _abspielenEreignis(ev) {
+    if (!this._$ || !this._meta || !this.isConnected || document.hidden || !this.getClientRects().length) return;
+    if (ev && ev.__wandRadarBehandelt) return;             // mehrere sichtbare Karten: nur die erste reagiert
+    if (ev) ev.__wandRadarBehandelt = true;
+    if (this._sv && this._rsel === 'karte') this._selectView('radar');   // zeigt gerade Route/Training: erst aufs Radar
+    if (this._state !== 'laeuft') this._play();
   }
   _show(tSec, rest) {
     const m = this._meta; if (!m) return;

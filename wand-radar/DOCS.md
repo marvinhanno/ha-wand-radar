@@ -35,6 +35,11 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    Ab Karte 1.15 (App 0.15.0): Scrollt ein `vertical-stack` der Ansicht (`overflow-y: auto` per card_mod, z. B. die linke Wand-Spalte), holt `custom:wand-radar`
    ihn nach `stapel_sekunden` (Standard 60, 0 = aus) ohne Berührung zurück nach oben. `art: heute` hat die Option `stapel_optional` (Liste „entity=zustand“):
    Bedingungs-Karten mit so einer Bedingung zählen für die Kompakt-Regel nicht mit und dürfen unter den Rand rutschen.
+   Ab Karte 1.18 (App 0.17.3) hat `custom:wand-radar` zwei Haken für andere Karten: Das Fensterereignis `wand-radar-abspielen`
+   (`window.dispatchEvent(new CustomEvent("wand-radar-abspielen"))`) startet ▶ wie der eigene Knopf (nur die sichtbare Karte reagiert; zeigt sie gerade
+   Route oder Training, schaltet sie erst aufs Radar). Und die Zeitleiste trägt eine Marke „Regen hh:mm“ (blauer Strich + Schild) an der Regenzeit aus
+   `regen_entity` (Standard `sensor.wand_radar_regen_ab`), nur wenn der Regen in weniger als 2 h kommt und es noch nicht regnet; bei „unbekannt“/„nicht verfügbar“
+   keine Marke. Sie ersetzt dann die bisherige Flagge „Regen ab“ an derselben Stelle.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
