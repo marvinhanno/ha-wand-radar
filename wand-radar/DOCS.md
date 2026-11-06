@@ -13,28 +13,10 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    `training_entity` (Standard `sensor.strava_latest_activity`, Attribute `summary_polyline`, `activity_type`, `distance_km`, `duration_minutes`, `pace`, `name`)
    eine Strecke, erscheint sie im Stil der Route (Leuchtlinie je Sportart, km-Marken, Start/Ziel) mit Umschalter „Training | Radar“.
    Vorrang: Route > Training > Radar. Die Karte liest nur `hass.states`, sie fragt weder Strava noch sonst etwas ab.
-   Ab Karte 1.8 (App 0.8.0) liefert dieselbe Datei den zweiten Kartentyp `custom:wand-sport` (Option `art`: `woche`, `letzte`, `jahr`, `monate`, `kalender`, `bestwerte`)
-   für eine Dashboard-Ansicht „Sport“: Statistik aus `sensor.strava_stats` bzw. `sensor.strava_latest_activity` (Fork `ha-workouts`), im HA-Kartenstil, ebenfalls nur `hass.states`.
-   Ab Karte 1.10 (App 0.10.0) gibt es den dritten Kartentyp `custom:wand-training` für einen Trainingsplan: `art: heute` zeigt die nächste Einheit
-   (aus `sensor.training_heute`, Option `entity`) mit animierter Strichfigur auf einer Wand-Ansicht, `art: plan` die Übungsliste. Die Übungen stehen
-   in der Kartenkonfiguration (`einheiten`) einer Ansicht (Option `ansicht`, Standard `training`); die Heute-Karte liest sie von dort per `lovelace/config`.
-   Ab Karte 1.11 (App 0.11.0) hat `art: heute` ein Lauf-Aussehen (Zustand `L`): trocken bis, Stundenleiste bis Sonnenuntergang mit Regen-Balken und bestem
-   Fenster, nächste Einheit und Wetter morgen – aus einem Sensor mit Attribut `daten` (Option `wetter`, Standard `sensor.laufwetter`).
-   Ab Karte 1.12 (App 0.12.0) ersetzen `art: naechste`, `einheit` und `saison` das vorläufige `art: plan`: `naechste` (Umschalter Winter|Sommer, Kacheln A/B/C,
-   Wochen-Soll, Knöpfe für Start/Erledigt/Woche aussetzen, lange drücken = Korrektur – ruft `script.training_*` auf), `einheit` (trägt die `einheiten`;
-   Aufwärmen mit durchlaufendem Timer, Übungskarten mit Figur, Paare, Timer-Ring für Halteübungen, Pausenleiste; Timer über Zielzeitpunkt, Wake-Lock,
-   Ton per WebAudio) und `saison` (Soll/Ist je ISO-Woche aus `sensor.training_stand` und den Läufen in `sensor.strava_stats.liste`, Option `wochen`).
-   Figuren gibt es für alle Übungen der Einheiten A/B/C und das Aufwärmen.
-   Ab Karte 1.13 (App 0.13.0) hat `art: naechste` einen Knopf „Geführt“: Er ruft `script.training_starten` und öffnet eine Vollbild-Ebene, die durch die Einheit
-   führt – Aufwärmen automatisch, dann Übung für Übung mit großer Figur, Satz x/y, links/rechts (Seitenwechsel ohne Pause), Knopf „Satz fertig“, Pause mit Ring
-   (+30 s, Weiter) und Vorschau; Paare abwechselnd, Halteübungen automatisch, haben alle Übungen `timer`, läuft die Einheit als Zirkel (`saetze` = Runden,
-   Option `wechsel`, Standard 20 s). Pausen: `pause` (Standard `pausen[1]`), `pause_kurz` nach einer Paar-Runde (Standard `pausen[0]`). Der Fortschritt bleibt nur
-   im Browser (localStorage, 4 h) und übersteht Neuladen und Sperren; gespeichert wird nichts. `art: einheit` zeigt die Übungen ab 640 px als Raster mit zwei Spalten.
-   Ab Karte 1.14 (App 0.14.0) bietet das Ende des geführten Modus zusätzlich „Ohne Watch trainiert? Als erledigt eintragen“ (Rückfrage → `script.training_erledigt`);
-   ist die Einheit heute schon eingetragen (`kraft_heute`), steht dort nur „… ist für heute eingetragen“.
+   Karte 1.8–1.18 (App 0.8.0–0.17.3) enthielt außerdem die Kartentypen `custom:wand-sport` und `custom:wand-training`. Ab Karte 1.19 (App 0.18.0) sind sie
+   nicht mehr Teil dieser App; die Datei enthält nur noch `custom:wand-radar`.
    Ab Karte 1.15 (App 0.15.0): Scrollt ein `vertical-stack` der Ansicht (`overflow-y: auto` per card_mod, z. B. die linke Wand-Spalte), holt `custom:wand-radar`
-   ihn nach `stapel_sekunden` (Standard 60, 0 = aus) ohne Berührung zurück nach oben. `art: heute` hat die Option `stapel_optional` (Liste „entity=zustand“):
-   Bedingungs-Karten mit so einer Bedingung zählen für die Kompakt-Regel nicht mit und dürfen unter den Rand rutschen.
+   ihn nach `stapel_sekunden` (Standard 60, 0 = aus) ohne Berührung zurück nach oben.
    Ab Karte 1.18 (App 0.17.3) hat `custom:wand-radar` zwei Haken für andere Karten: Das Fensterereignis `wand-radar-abspielen`
    (`window.dispatchEvent(new CustomEvent("wand-radar-abspielen"))`) startet ▶ wie der eigene Knopf (nur die sichtbare Karte reagiert; zeigt sie gerade
    Route oder Training, schaltet sie erst aufs Radar). Und die Zeitleiste trägt eine Marke „Regen hh:mm“ (blauer Strich + Schild) an der Regenzeit aus
