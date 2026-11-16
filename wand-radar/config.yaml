@@ -1,7 +1,7 @@
 name: Wand-Radar
-version: "0.18.0"
+version: "0.19.0"
 slug: wand_radar
-description: Rechnet aus dem DWD-Regenradar (WN, +2 h Nowcast) ein fertiges Standbild und Video für ein Wandpanel.
+description: Rechnet aus dem DWD-Regenradar (WN) und einer eigenen +2-h-Vorhersage (Radar-Bewegung + ICON-D2-RUC) ein fertiges Standbild und Video für ein Wandpanel.
 url: https://github.com/marvinhanno/ha-wand-radar
 arch:
   - amd64
@@ -28,6 +28,7 @@ options:
   timezone: Europe/Berlin
   preset: veryfast
   output_dir: /config/www/wand-radar
+  prognose: eigen
 schema:
   latitude: float?
   longitude: float?
@@ -48,3 +49,4 @@ schema:
   panel_zoom: int(0,11)?
   archiv_tage: int(0,30)?
   prognose_test: bool?
+  prognose: list(eigen|dwd)?

@@ -2,7 +2,8 @@
 
 Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) veröffentlicht hat. Bei neuem Lauf:
 
-1. Vergangenheit (−`past_minutes`) aus den gespeicherten Analysebildern früherer Läufe, Vorhersage +120 min aus dem neuen Lauf.
+1. Vergangenheit (−`past_minutes`) aus den gespeicherten Analysebildern früherer Läufe, „jetzt“ = Analyse des neuen Laufs, Vorhersage +5 … +120 min
+   (seit 0.19.0) aus der **eigenen Vorhersage** (Option `prognose: eigen`, s. „Eigene Vorhersage“) oder aus der DWD-Vorhersage im Lauf (`prognose: dwd`, bis 0.18.0 immer).
 2. Umrechnung auf den Bildausschnitt (Web-Mercator, Zoom `zoom`, `width`×`height`, Mitte = Zone „Zuhause“ oder `latitude`/`longitude`).
 3. Einfärben (feste dBZ-Stützpunkte), je 5-min-Schritt 4 Zwischenbilder per Optical Flow, Grundkarte darunter, Ortsnamen darüber.
 4. Ausgabe nach `output_dir` (Standard `/config/www/wand-radar`, im Browser unter `/local/wand-radar/`):
@@ -23,7 +24,8 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    `regen_entity` (Standard `sensor.wand_radar_regen_ab`), nur wenn der Regen in weniger als 2 h kommt und es noch nicht regnet; bei „unbekannt“/„nicht verfügbar“
    keine Marke. Sie ersetzt dann die bisherige Flagge „Regen ab“ an derselben Stelle.
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
-   Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt).
+   Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt)
+   und seit 0.19.0 `prognose` (`eigen` oder `dwd`: welche Vorhersage dieser Lauf tatsächlich genommen hat; steht auch in `meta.json`).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
 6. **Route** (eigener Thread, `route.py`, seit 0.3.0): schreibt jede Minute bei Bedarf `route.json` neben die Radardateien –
    die Strecke, die die Karte im Routenmodus als Hintergrund zeichnet. Gelesen werden die HA-Helfer `input_text.termin_koordinaten`,
@@ -45,6 +47,24 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
 7. **Pause** (seit 0.6.0): Ist `pause_entity` gesetzt und `on` (z. B. nachts), holt und rechnet die App kein Radar und meldet den
    Sensor „nicht verfügbar“. Danach rechnet sie sofort neu (fehlende Vergangenheitsbilder holt sie beim DWD nach, ca. 2 min).
 
+## Eigene Vorhersage (seit 0.19.0)
+
+Die DWD-Vorhersage (`composite_wn`) verschiebt das Radarbild nur starr. Die eigene Vorhersage **DA50** (`prognose.py`, `vorhersage.py`) rechnet je Lauf
+in einem Gebiet von ≈ 500 × 500 km um die Kartenmitte:
+
+- ein dichtes Bewegungsfeld aus den Analysen der letzten 20 min (Optical Flow DIS auf 2 km, geglättet, trockene Flächen aus der Umgebung gefüllt) und verschiebt
+  das Bild von „jetzt“ damit rückwärts (gekrümmte Bahnen, Drehung bleibt),
+- mischt die simulierte Reflektivität des Wettermodells ICON-D2-RUC (`DBZ_CMAX`, opendata.dwd.de) ein, vorher per Quantil-Abgleich an das Radar angeglichen;
+  Gewicht linear von 0 auf 0,5 bei +120 min (so wachsen oder zerfallen Regengebiete, wie das Modell es erwartet).
+
+ICON-D2-RUC kommt stündlich, ≈ 40 min nach Laufbeginn; die App holt davon nur Laufbeginn + 30 … 225 min (14 Felder, ≈ 11 MB je Stunde) – so weit, wie die +2-h-Vorhersage bei einem bis zu 100 min alten Lauf braucht. Die Zuordnung der Modellzellen
+zum Radargitter wird einmal berechnet und liegt wie der letzte Modelllauf in `/data`. Auf einem Ryzen 5700G kostet die Vorhersage ≈ 0,3 s je Lauf.
+
+- **Rückweg:** Bei einem Fehler, oder wenn nach einem Neustart weniger als zwei der drei 10-min-Bildpaare für das Bewegungsfeld vorliegen, nimmt der Lauf
+  die DWD-Vorhersage und schreibt den Grund ins Log (`Vorhersage: …`). Fehlt nur das Modell, rechnet die App ohne Einmischen (nur das Bewegungsfeld).
+- **Sparsam:** Zeigt weder das Radar im Gebiet ein Echo ≥ `rain_threshold_dbz` noch das Modell dort Regen, wird nichts gerechnet (alle Felder trocken).
+- Log je Lauf: `Vorhersage: eigen DA50, RUC 06Z (60 min alt, 24/24 Schritte), Regenfläche 24.4 %, Rechnen 0.47 s, …`.
+
 ## Optionen
 
 | Option | Standard | Bedeutung |
@@ -63,9 +83,11 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
 | `pause_entity` | leer | Entität, deren Zustand `on` das Radar pausieren lässt (z. B. nachts); leer = nie |
 | `panel_width`, `panel_height` | 0 (aus) | Größe eines zweiten, kleinen Standbilds `still_panel.jpg` (nur „jetzt“, gleiche Farben und Karte wie `still.jpg`, Mitte = dieselbe Kartenmitte) für ein kleines Bedienpanel, z. B. 600×720. Wird nur zusammen mit dem Standbild der Wand und nur bei einem neuen Radarlauf gerechnet (ein Bild, < 2 s), nicht als Video. 0 = es entsteht keine Datei (eine vorhandene alte Datei wird dann gelöscht, ebenso nach einem Fehler beim Rechnen) |
 | `panel_zoom` | 0 | Kartenzoom des Panel-Standbilds; 0 = wie `zoom`. Ein kleinerer Wert zeigt ein größeres Gebiet (Zoom 8 bei 600 px ≈ 230 km breit) |
+| `prognose` | eigen | Quelle der Vorhersage +5 … +120 min: `eigen` (DA50, s. „Eigene Vorhersage“) oder `dwd` (DWD-Vorhersage aus dem Radarlauf, Verhalten bis 0.18.0) |
 | `archiv_tage` | 0 (aus) | **Nur für eine Messphase** (eigene Regenvorhersage, seit 0.17.0): legt je Lauf das Analysebild (≈ 500 × 500 km um Zuhause, 1 km), alle 15 min die DWD-Vorhersage bei +30/+60/+120 min samt Reihe am Zuhause-Punkt und je Stunde einen ICON-D2-RUC-Lauf (`DBZ_CMAX` 0 … 240 min, 2 km) nach `/share/wand-radar-archiv/`; Tage älter als `archiv_tage` werden gelöscht. ≈ 50 MB je Regentag, ≈ 14 MB Download je Stunde für RUC. Eigener Thread mit Log-Präfix `Archiv:` – ein Fehler dort hält das Radar nicht auf |
-| `prognose_test` | aus | **Nur für die Messphase:** rechnet alle 15 min die Vorhersage-Kandidaten aus `prognose.py` (A, A2, Bm, D) zusätzlich und schreibt nur die Rechenzeiten ins Log (`Prognose-Test: …`). Ändert keine Ausgabe. Holt dafür wie `archiv_tage` stündlich ICON-D2-RUC |
+| `prognose_test` | aus | **Nur für die Messphase:** rechnet alle 15 min die Vorhersage-Kandidaten aus `prognose.py` (seit 0.19.0 nur noch A und DA50; bis 0.18.0 A, A2, Bm, D) zusätzlich und schreibt nur die Rechenzeiten ins Log (`Prognose-Test: …`). Ändert keine Ausgabe. Holt dafür wie `archiv_tage` stündlich ICON-D2-RUC |
 
 Route lokal testen: `HA_URL`/`HA_TOKEN` setzen, `WR_ROUTE_JETZT=<ISO-Zeit>` und `WR_ROUTE_REISE=<JSON wie wand_reise>` simulieren Zeit und Reise, `python wand-radar/wand_radar.py --route-once`.
 
 Lokal testen: `pip install -r wand-radar/requirements.txt`, dann `WR_OUTPUT_DIR=out python wand-radar/wand_radar.py --once`.
+Ein älterer Lauf: `WR_AT=<JJJJMMTT_HHMM>` (UTC, DWD hält das Radar 48 h, ICON-D2-RUC ≈ 24 h); `WR_PROGNOSE=dwd` zum Vergleich.

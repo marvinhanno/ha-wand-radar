@@ -1,11 +1,12 @@
-"""Vorhersage-Kandidaten (Plan: plaene/wand-radar-prognose/PLAN.md, Abschnitt „Kandidaten“).
+"""Eigene Regenvorhersage DA50 (Plan: plaene/wand-radar-prognose/PLAN.md im privaten Konfig-Repo, „Entscheidungen 0d“).
 
-Jeder Kandidat: kandidat(e: Eingang) -> np.ndarray (24, Zeilen, Spalten) in dBZ für +5 … +120 min.
-Nur numpy/cv2 (pysteps gibt es nur als Quellpaket mit C/OpenMP-Teilen, siehe messung.md).
-Bewegung auf 2 km (halbe Auflösung), Verschiebung des Radarbilds auf 1 km, immer rückwärts (Semi-Lagrange).
+DA50 = A (dichtes Bewegungsfeld aus den letzten Radar-Analysen, konstant, Rückwärts-Verschiebung, Drehung bleibt)
++ ICON-D2-RUC eingemischt, Gewicht linear 0 → 0,5 bei +120 min, RUC vorher per Quantil-Abgleich an das Radar angeglichen.
+Ergebnis: np.ndarray (24, Zeilen, Spalten) in dBZ für +5 … +120 min. Nur numpy/cv2.
 
-Dieselbe Datei liegt als prognose.py in der App (../ha-wand-radar/wand-radar/) – nur hier ändern und dorthin kopieren.
-Erwartet von e.fall: analyse(t), ruc_lauf_fuer(t0), ruc_dbz(lauf, t), für WN zusätzlich wn(t0).
+Schlanke Kopie von werkzeuge/radar-prognose/kandidaten.py (Mess-Werkzeug, dort die Quelle): nur die Teile für DA50,
+die Funktionen wörtlich übernommen. Einzige Abweichung: Eingang liest nur die Analysen 0 … 20 min zurück (mehr braucht A nicht).
+Erwartet von e.fall: analyse(t), ruc_lauf_fuer(t0), ruc_dbz(lauf, t).
 """
 import datetime as dt
 
@@ -18,6 +19,7 @@ SCHRITTE = 24            # 24 × 5 min = +120 min
 SUB = 2                  # Teilschritte je 5 min beim Rückwärtsverfolgen (gekrümmte Bahnen)
 NASS = 10.0              # dBZ ab der ein Pixel als Echo für die Bewegungsschätzung zählt
 MIN5 = dt.timedelta(minutes=5)
+ZURUECK = 5              # Analysen t0, t0 − 5 … t0 − 20 min (Paare in bewegung_radar)
 
 
 class Eingang:
@@ -25,7 +27,7 @@ class Eingang:
 
     def __init__(self, fall, t0):
         self.fall, self.t0 = fall, t0
-        self.analysen = {k: fall.analyse(t0 - k * MIN5) for k in range(0, 13)}    # k = Schritte zurück (0 … 60 min)
+        self.analysen = {k: fall.analyse(t0 - k * MIN5) for k in range(0, ZURUECK)}    # k = Schritte zurück
         self.ruc_lauf = fall.ruc_lauf_fuer(t0)
         self._cache = {}
 
@@ -140,17 +142,7 @@ def verlagern(feld, Ds):
     return np.array(out)
 
 
-# ---------- Kandidaten ----------
-def P(e):
-    """Persistenz: das Bild von jetzt bleibt stehen (Unterkante)."""
-    return np.repeat(e.jetzt()[None], SCHRITTE, axis=0)
-
-
-def WN(e):
-    """DWD-Vorhersage (heutiger Stand). Als Liste: aus dem App-Archiv gibt es nur +30/+60/+120 min, der Rest ist None."""
-    return e.fall.wn(e.t0)
-
-
+# ---------- DA50 ----------
 def A(e):
     """Konstantes, aber ortsabhängiges Bewegungsfeld aus dem Radar – gekrümmte Bahnen, Drehung bleibt."""
     def rechnen():
@@ -159,116 +151,10 @@ def A(e):
     return e.merke("A", rechnen)
 
 
-def bewegung_ruc(e):
-    """Bewegungsfelder aus aufeinanderfolgenden RUC-Bildern (15 min Abstand), je 5 min, Mitte des Intervalls bei t0 + (k+1,5)·5 min."""
-    def rechnen():
-        feld = {k: e.ruc(k) for k in range(-3, SCHRITTE + 4, 3)}
-        vs = {}
-        for k in range(-3, SCHRITTE + 1, 3):
-            if feld.get(k) is None or feld.get(k + 3) is None:
-                continue
-            f, w = fluss(feld[k], feld[k + 3])
-            vs[k + 1.5] = glaetten(f / 3, w)
-        return vs
-    return e.merke("v_ruc", rechnen)
+# --- DA50: RUC zunehmend eingemischt ---
+BODEN = 5.0      # dBZ-Untergrenze beim Mischen (darunter gilt als trocken)
 
 
-def A2(e):
-    """Wie A, das Feld ändert sich aber mit der Zeit so, wie es sich im RUC ändert: v(k) = v_radar + (v_ruc(k) − v_ruc(0))."""
-    def rechnen():
-        v0 = bewegung_radar(e)
-        vs = bewegung_ruc(e)
-        if len(vs) < 2:
-            return A(e)
-        mitten = np.array(sorted(vs))
-        stapel = np.array([vs[m] for m in mitten])
-
-        def v_ruc(k):          # zwischen den Intervallmitten linear, außen festhalten
-            k = np.clip(k, mitten[0], mitten[-1])
-            i = min(np.searchsorted(mitten, k, side="right") - 1, len(mitten) - 2)
-            f = (k - mitten[i]) / (mitten[i + 1] - mitten[i])
-            return stapel[i] * (1 - f) + stapel[i + 1] * f
-        basis = v_ruc(0)
-        felder = {j: (v0 + (v_ruc(j - 0.5) - basis)).astype(np.float32) for j in range(1, SCHRITTE + 1)}
-        return verlagern(e.jetzt(), verschiebungen(lambda j: felder[j]))
-    return e.merke("A2", rechnen)
-
-
-# --- B: Zerfall je nach Größe (S-PROG-Art, ohne pysteps) ---
-BODEN = 5.0      # dBZ-Untergrenze für die Skalenzerlegung (darunter gilt als trocken)
-EBENEN = 8       # Skalen 500 … 4 km (Faktor 2)
-_FILTER = {}
-
-
-def _filter(shape):
-    """Gaussche Bandpässe über log2(Wellenzahl), Summe je Wellenzahl = 1."""
-    if shape not in _FILTER:
-        ky = np.fft.fftfreq(shape[0]) * shape[0]
-        kx = np.fft.rfftfreq(shape[1]) * shape[1]
-        k = np.sqrt(ky[:, None] ** 2 * (shape[1] / shape[0]) ** 2 + kx[None, :] ** 2)
-        lk = np.log2(np.maximum(k, 0.5))
-        w = np.array([np.exp(-(lk - l) ** 2 / (2 * 0.6 ** 2)) for l in range(EBENEN)])
-        w[0][k < 1] = 1
-        w[1:, k < 1] = 0
-        _FILTER[shape] = w / w.sum(axis=0)
-    return _FILTER[shape]
-
-
-def zerlegen(feld):
-    F = np.fft.rfft2(feld)
-    return np.array([np.fft.irfft2(F * w, s=feld.shape) for w in _filter(feld.shape)]).astype(np.float32)
-
-
-def rho_ebenen(e, D2):
-    """Lagrange-Autokorrelation je Skala über 10 min: Analyse t0−10 mit der Bewegung verschoben gegen t0, auf 5 min umgerechnet."""
-    alt = e.analysen[2]
-    if alt is None:
-        return np.full(EBENEN, 0.95)
-    vorher = zerlegen(np.maximum(verlagern(alt, [D2])[0], BODEN))
-    jetzt = zerlegen(np.maximum(e.jetzt(), BODEN))
-    r = []
-    for a, b in zip(vorher, jetzt):
-        a, b = a - a.mean(), b - b.mean()
-        c = float((a * b).sum() / max(np.sqrt((a * a).sum() * (b * b).sum()), 1e-9))
-        r.append(np.sqrt(np.clip(c, 0.01, 0.9999)))
-    r = np.array(r)
-    r[0] = 1.0             # größte Skala (Mittelwert) bleibt
-    return r
-
-
-def zerfall(e, basis, Ds, cdf=False):
-    rho = rho_ebenen(e, Ds[1])
-    out = []
-    for k in range(SCHRITTE):
-        lv = zerlegen(np.maximum(basis[k], BODEN))
-        f = np.tensordot(rho ** (k + 1), lv, axes=1)
-        if cdf:             # Werteverteilung der reinen Verschiebung übernehmen (Regenfläche bleibt, Muster wird weicher)
-            ziel = np.sort(basis[k].ravel())
-            rang = np.argsort(np.argsort(f.ravel()))
-            f = ziel[rang].reshape(f.shape)
-        out.append(np.where(f < BODEN, TROCKEN, f).astype(np.float32))
-    return np.array(out)
-
-
-def B(e):
-    """A + kleine Skalen verlieren mit der Zeit an Gewicht (Vorhersage wird weicher und schwächer)."""
-    def rechnen():
-        v = bewegung_radar(e)
-        Ds = verschiebungen(lambda j: v)
-        return zerfall(e, A(e), Ds)
-    return e.merke("B", rechnen)
-
-
-def Bm(e):
-    """Wie B, aber mit der Werteverteilung von A (Fläche und Stärken bleiben, nur das Muster wird weicher)."""
-    def rechnen():
-        v = bewegung_radar(e)
-        Ds = verschiebungen(lambda j: v)
-        return zerfall(e, A(e), Ds, cdf=True)
-    return e.merke("Bm", rechnen)
-
-
-# --- D: RUC zunehmend eingemischt ---
 def quantil_abgleich(ruc0, radar0):
     """Abbildung RUC-dBZ → Radar-dBZ über die Werteverteilung zur Zeit t0 (im ganzen Rechengebiet)."""
     q = np.linspace(0, 100, 201)
@@ -304,8 +190,6 @@ def mit_ruc(basis_fn, ende=0.5, name=None):
     return kandidat
 
 
-D = mit_ruc(A2, 0.5, "D")
+DA50 = mit_ruc(A, 0.5, "DA50")
 
-ALLE = {"WN": WN, "P": P, "A": A, "A2": A2, "B": B, "Bm": Bm, "D": D}
-VARIANTEN = {"D25": mit_ruc(A2, 0.25, "D25"), "D75": mit_ruc(A2, 0.75, "D75"), "D_B": mit_ruc(B, 0.5, "D_B"),
-             "D_Bm": mit_ruc(Bm, 0.5, "D_Bm")}
+ALLE = {"A": A, "DA50": DA50}

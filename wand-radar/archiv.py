@@ -27,7 +27,7 @@ RUC = "https://opendata.dwd.de/weather/nwp/v1/m/icon-d2-ruc/p/"
 RUC_VERZUG = 40           # min nach Laufbeginn, ab denen ein Lauf geholt wird
 RUC_MINUTEN = range(0, 241, 15)
 GROESSE = 500             # Kantenlänge des Rechengebiets in km
-UA = {"User-Agent": "ha-wand-radar/0.17 (Home Assistant add-on)"}
+UA = {"User-Agent": "ha-wand-radar/0.19 (Home Assistant add-on)"}
 UTC = dt.timezone.utc
 
 
@@ -83,6 +83,16 @@ def ruc_index(gebiet, clat, clon):
     return idx.astype(np.int64)
 
 
+def ruc_get(var, lauf, minuten):
+    """Ein GRIB2-Feld eines ICON-D2-RUC-Laufs (None, solange es noch nicht da ist). Auch für die eigene Vorhersage (vorhersage.py)."""
+    url = f"{RUC}{var}/r/{lauf:%Y-%m-%dT%H}%3A00/s/PT{minuten // 60:03d}H{minuten % 60:02d}M.grib2"
+    r = requests.get(url, headers=UA, timeout=60)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.content
+
+
 def lies_grib(blob):
     import eccodes                                # nur hier gebraucht, Import kostet Zeit
     g = eccodes.codes_new_from_message(blob)
@@ -113,7 +123,7 @@ class AppFall:
         return max(ok) if ok else None
 
     def ruc_dbz(self, lauf, t):
-        m = (t - lauf).total_seconds() / 60
+        m = (t - lauf).total_seconds() / 60 - getattr(self.a, "ruc_ab_min", 0)    # vorhersage.py holt erst ab Laufbeginn + 30 min
         k = m / 15
         st = self.a.ruc[lauf]
         if k < 0 or k > len(st) - 1:
@@ -205,12 +215,7 @@ class Archiv(threading.Thread):
 
     # ---------- ICON-D2-RUC ----------
     def _get(self, var, lauf, minuten):
-        url = f"{RUC}{var}/r/{lauf:%Y-%m-%dT%H}%3A00/s/PT{minuten // 60:03d}H{minuten % 60:02d}M.grib2"
-        r = requests.get(url, headers=UA, timeout=60)
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        return r.content
+        return ruc_get(var, lauf, minuten)
 
     def ruc_holen(self):
         jetzt = dt.datetime.now(UTC)
@@ -259,7 +264,7 @@ class Archiv(threading.Thread):
             self.log("Prognose-Test: zu wenige Analysebilder, übersprungen")
             return
         zeiten = []
-        for n in ("A", "A2", "Bm", "D"):
+        for n in prognose.ALLE:                   # seit 0.19.0 nur noch A und DA50 (die App enthält nur DA50)
             e = prognose.Eingang(fall, t0)        # frisch je Kandidat: Zeit enthält die Bewegungsschätzung
             t = time.time()
             prognose.ALLE[n](e)

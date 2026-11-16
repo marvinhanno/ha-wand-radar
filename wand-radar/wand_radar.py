@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Wand-Radar: rechnet das DWD-Regenradar (WN-Komposit, 1 km, 5 min, +120 min Nowcast) zu fertigen Wand-Hintergründen.
+"""Wand-Radar: rechnet das DWD-Regenradar (WN-Komposit, 1 km, 5 min) zu fertigen Wand-Hintergründen.
+
+Vorhersage +5 … +120 min: eigene (DA50, vorhersage.py/prognose.py, Option prognose: eigen) oder die des DWD (WN, prognose: dwd
+und Rückweg bei jedem Fehler der eigenen).
 
 Ausgabe in output_dir:
   still.jpg   Karte + Radar "jetzt"
@@ -29,6 +32,7 @@ from pyproj import Transformer
 
 import archiv
 import route
+import vorhersage
 
 DWD = "https://opendata.dwd.de/weather/radar/composite/wn/"
 ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
@@ -49,7 +53,7 @@ def load_config():
     """Add-on-Optionen aus /data/options.json, lokal aus Umgebungsvariablen (WR_*)."""
     cfg = dict(zoom=9, width=1366, height=1024, past_minutes=60, fps=18, rain_threshold_dbz=14,
                timezone="Europe/Berlin", preset="veryfast", output_dir="out", latitude=None, longitude=None,
-               panel_width=0, panel_height=0, panel_zoom=0, archiv_tage=0, prognose_test=False)
+               panel_width=0, panel_height=0, panel_zoom=0, archiv_tage=0, prognose_test=False, prognose="eigen")
     if os.path.exists("/data/options.json"):
         cfg.update({k: v for k, v in json.load(open("/data/options.json")).items() if v is not None})
     for k in cfg:
@@ -295,31 +299,36 @@ def render_panel_still(cfg, geo, where, cover, dbz_now, path):
         return False
 
 
-def render(cfg, geo, t0, forecast, out_dir, panel_geo=None):
-    """forecast: {Minuten: hdf5-Bytes} von +0 bis +120. Schreibt still.jpg, radar.mp4, meta.json (und still_panel.jpg, wenn panel_geo gesetzt); gibt meta zurück."""
+def dwd_felder(forecast):
+    """Die DWD-Vorhersage (WN) aus dem Lauf: {Minuten: dBZ} für +5 … +120."""
+    return {m: read_h5(b)[0] for m, b in forecast.items() if m > 0}
+
+
+def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd"):
+    """now_h5: (dBZ, Abdeckung, where) der Analyse; fields: {Minuten: dBZ} für +5 … +120 (eigene oder DWD-Vorhersage).
+    Schreibt still.jpg, radar.mp4, meta.json (und still_panel.jpg, wenn panel_geo gesetzt); gibt meta zurück."""
     W, H = geo.w, geo.h
     tz = ZoneInfo(cfg["timezone"])
     n_past = cfg["past_minutes"] // STEP
 
-    frames, times, cover = [], [], None
-    where = None
+    frames, times = [], []
     for k in range(n_past, 0, -1):                        # Vergangenheit
         t = t0 - dt.timedelta(minutes=k * STEP)
         b = past_blob(cfg, t)
         frames.append(read_h5(b)[0] if b else None)
         times.append(t)
-    for m in sorted(forecast):                            # jetzt + Vorhersage
-        dbz, cov, where = read_h5(forecast[m])
-        if m == 0:
-            cover = cov
-        frames.append(dbz)
+    dbz_now, cover, where = now_h5                        # jetzt + Vorhersage
+    frames.append(dbz_now)
+    times.append(t0)
+    for m in sorted(fields):
+        frames.append(fields[m])
         times.append(t0 + dt.timedelta(minutes=m))
     now = n_past
     for k in range(len(frames)):                          # Lücken (fehlende DWD-Läufe) mit dem Nachbarbild füllen
         if frames[k] is None:
             src = next((frames[j] for j in list(range(k - 1, -1, -1)) + list(range(k + 1, len(frames))) if frames[j] is not None), None)
             frames[k] = src
-    log(f"Bilder: {len(frames)}, {times[0]:%H:%M}Z … {times[-1]:%H:%M}Z")
+    log(f"Bilder: {len(frames)}, {times[0]:%H:%M}Z … {times[-1]:%H:%M}Z, Vorhersage {prognose}")
 
     sc = Scene(geo, where, cover)
     crop = sc.crop(frames)
@@ -400,6 +409,7 @@ def render(cfg, geo, t0, forecast, out_dir, panel_geo=None):
         "max_mm_h": max((mmh[k] for k in rng), default=0.0),
         "summe_mm": round(sum(mmh[k] for k in rng) * STEP / 60, 2),
         "verlauf": mmh[now:now + 24],    # mm/h am Zuhause-Punkt ab jetzt, ein Wert je Schritt (STEP min)
+        "prognose": prognose,            # Quelle der Vorhersage dieses Laufs: eigen (DA50) oder dwd (WN)
     }
     for name in ("still.jpg", "radar.mp4") + (("still_panel.jpg",) if panel_still else ()):
         os.replace(tmp(name), os.path.join(out_dir, name))
@@ -446,7 +456,7 @@ class Mqtt:
     def publish(self, meta):
         if not self.client:
             return
-        keys = ("regnet_jetzt", "regen_ab", "regen_bis", "regen_dauer_min", "max_mm_h", "summe_mm", "t0", "t0_epoch", "verlauf")
+        keys = ("regnet_jetzt", "regen_ab", "regen_bis", "regen_dauer_min", "max_mm_h", "summe_mm", "t0", "t0_epoch", "verlauf", "prognose")
         p = {k: meta[k] for k in keys}
         p["regen_ab_iso"] = meta["regen_ab_iso"]
         self.client.publish(f"{self.BASE}/state", json.dumps(p), retain=True)
@@ -474,7 +484,8 @@ def main():
     cfg = load_config()
     out_dir = cfg["output_dir"]
     lat, lon = home_position(cfg)
-    log(f"Wand-Radar startet: Zuhause {lat:.4f}, {lon:.4f}, Zoom {cfg['zoom']}, {cfg['width']}×{cfg['height']}, Ausgabe {out_dir}")
+    log(f"Wand-Radar startet: Zuhause {lat:.4f}, {lon:.4f}, Zoom {cfg['zoom']}, {cfg['width']}×{cfg['height']}, Ausgabe {out_dir}, "
+        f"Vorhersage {cfg['prognose']}")
     if "--route-once" in sys.argv:                   # Test: nur die Route einmal rechnen
         route.RouteWorker(cfg, (lat, lon)).tick()
         return
@@ -484,6 +495,7 @@ def main():
     panel_geo = panel_geometry(cfg, lat, lon)
     publish_card(out_dir)
     arch = archiv.start(cfg, (lat, lon), read_h5, log)     # nur Messphase der eigenen Vorhersage (archiv_tage, prognose_test)
+    eigen = vorhersage.Vorhersage(cfg, (lat, lon), read_h5, past_blob, log) if cfg["prognose"] != "dwd" else None
     mq = Mqtt()
     if "SUPERVISOR_TOKEN" in os.environ:
         try:
@@ -526,13 +538,24 @@ def main():
                     started = time.time()
                     store_past(cfg, t0, m[names[0]])
                     forecast = {int(n.split("_")[4][:3]): m[n] for n in names}
-                    meta = render(cfg, geo, t0, forecast, out_dir, panel_geo)
+                    now_h5 = read_h5(forecast[0])
+                    fields, quelle = None, "dwd"
+                    if eigen:
+                        try:
+                            fields = eigen.felder(t0, now_h5[0], now_h5[2])
+                        except Exception as e:
+                            log("Vorhersage: eigene fehlgeschlagen, nehme DWD:", repr(e))
+                        quelle = "eigen" if fields is not None else "dwd"
+                    if fields is None:
+                        fields = dwd_felder(forecast)
+                    meta = render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo, quelle)
                     mq.publish(meta)
                     if arch:
                         arch.neuer_lauf(t0, forecast)
                     clean_past(cfg, t0)
                     last_t0 = t0
-                    log(f"fertig in {time.time() - started:.0f} s: Lauf {meta['t0']}, Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")
+                    log(f"fertig in {time.time() - started:.0f} s: Lauf {meta['t0']}, Vorhersage {quelle}, "
+                        f"Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")
                 etag = new
                 last_ok = time.time()
             else:
