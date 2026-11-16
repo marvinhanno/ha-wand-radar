@@ -7,6 +7,8 @@ Je Lauf, im Rechengebiet ≈ 500 × 500 km um Zuhause (archiv.Gebiet):
 - prognose.DA50 → Felder +5 … +120 min. Fehlt RUC, rechnet DA50 nur mit dem Radar-Bewegungsfeld (A).
 Sparsam: kein Echo ≥ rain_threshold_dbz im Rechengebiet und RUC dort ohne Regen → nichts rechnen, alle Felder trocken.
 felder() gibt None zurück (Grund im Log), wenn die eigene Vorhersage nicht geht; dann nimmt der Lauf die DWD-Vorhersage (WN).
+Seit 0.20.0 für das Video: bewegung (Bewegungsfeld des letzten Laufs, daraus die Zwischenbilder der Vorhersage) und
+ruc_regen() (zeigt RUC im Wand-Ausschnitt Regen in 2 h? – Teil der Regel „trocken = kein Video“).
 """
 import datetime as dt
 import os
@@ -37,11 +39,13 @@ class Vorhersage:
         self.ruc = {}                    # Laufbeginn -> (14, h/2, w/2) dBZ, erstes Feld = Laufbeginn + RUC_MINUTEN[0]
         self.ruc_ab_min = RUC_MINUTEN[0]  # für archiv.AppFall.ruc_dbz
         self.ruc_versuch = 0.0
+        self.bewegung = None             # Bewegungsfeld des letzten Laufs (2 km, Rechengebiet, 2-km-Pixel je 5 min) oder None
 
     # ---------- ein Lauf ----------
     def felder(self, t0, dbz0, where):
         """{Minuten: dBZ-Feld auf dem DWD-Gitter} für +5 … +120 oder None (dann WN)."""
         start = time.time()
+        self.bewegung = None
         if self.gebiet is None:
             self.gebiet = archiv.Gebiet(where, dbz0.shape, *self.home)
             self._ruc_laden()
@@ -74,6 +78,7 @@ class Vorhersage:
         else:
             v = prognose.DA50(e)
             art = "DA50" if mit_ruc > 0 else "A (ohne RUC)"
+            self.bewegung = e.merke("v_radar", lambda: None)
         rechnen = time.time() - t
         ruc_txt = f"RUC {lauf:%H}Z ({alter:.0f} min alt, {max(mit_ruc, 0)}/24 Schritte)" if lauf else "RUC fehlt"
         self.log(f"Vorhersage: eigen {art}, {ruc_txt}, Regenfläche {nass:.1f} %, Rechnen {rechnen:.2f} s, "
@@ -87,6 +92,33 @@ class Vorhersage:
                 f[g.r0:g.r1, g.c0:g.c1] = v[k]
             out[(k + 1) * 5] = f
         return out
+
+    def ruc_regen(self, t0, kasten, maske=None, min_km2=0):
+        """Zeigt der RUC-Lauf für t0 im Kasten (Zeilen r0:r1, Spalten c0:c1 im DWD-Gitter, z. B. der Wand-Ausschnitt; maske: DWD-Pixel
+        darin, die zählen) zwischen t0 und t0 + 120 min in einem Schritt mehr als min_km2 Echo ≥ rain_threshold_dbz? None ohne RUC-Lauf.
+        Rohwerte des Modells (ohne Angleichen), 15-min-Schritte, 2 km (je Zelle 4 km²)."""
+        if self.gebiet is None:
+            return None
+        ok = [r for r in self.ruc if r + dt.timedelta(minutes=archiv.RUC_VERZUG) <= t0]
+        if not ok:
+            return None
+        lauf = max(ok)
+        alter = (t0 - lauf).total_seconds() / 60
+        sel = [i for i, m in enumerate(RUC_MINUTEN) if alter - 15 < m < alter + 120 + 15]
+        if not sel:
+            return None
+        g, (r0, r1, c0, c1) = self.gebiet, kasten
+        rr0, rr1 = max(0, (r0 - g.r0) // 2), max(0, (r1 - g.r0 + 1) // 2)
+        cc0, cc1 = max(0, (c0 - g.c0) // 2), max(0, (c1 - g.c0 + 1) // 2)
+        nass = self.ruc[lauf][sel, rr0:rr1, cc0:cc1] >= self.thr
+        if maske is not None:                    # Maske (1 km) auf 2 km: Zelle zählt, wenn eines ihrer Pixel im Bild liegt
+            m = np.zeros(nass.shape[1:], bool)
+            yy, xx = np.nonzero(maske[:(r1 - r0), :(c1 - c0)])
+            yy, xx = (yy + r0 - g.r0) // 2 - rr0, (xx + c0 - g.c0) // 2 - cc0
+            ok = (yy >= 0) & (yy < m.shape[0]) & (xx >= 0) & (xx < m.shape[1])
+            m[yy[ok], xx[ok]] = True
+            nass &= m
+        return bool(nass.reshape(len(sel), -1).sum(axis=1).max() * 4 >= max(min_km2, 1))
 
     # ---------- ICON-D2-RUC ----------
     def ruc_holen(self, t0):

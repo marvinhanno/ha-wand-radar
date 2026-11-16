@@ -7,19 +7,23 @@ und Rückweg bei jedem Fehler der eigenen).
 Ausgabe in output_dir:
   still.jpg   Karte + Radar "jetzt"
   still_panel.jpg   dasselbe in klein für ein Bedienpanel (nur mit panel_width/panel_height, eigener Zoom möglich)
-  radar.mp4   H.264, -past_minutes … +120 min, je 5-min-Schritt 4 berechnete Zwischenbilder
+  radar.mp4   H.264, -past_minutes … +120 min, je 5-min-Schritt 4 berechnete Zwischenbilder – seit 0.20.0 nur bei Regen im
+              Wand-Ausschnitt (trocken: meta.json video: false, kein Video; button.wand_radar_video rechnet es auf Abruf)
   meta.json   Zeiten, Verlauf am Zuhause-Punkt, Regenbeginn
-Dazu ein MQTT-Sensor "Wand-Radar Regen ab" (sensor.wand_radar_regen_ab).
+Dazu per MQTT der Sensor "Wand-Radar Regen ab" (sensor.wand_radar_regen_ab) und seit 0.20.0 der Knopf button.wand_radar_video.
 """
 import datetime as dt
 import io
 import json
 import math
 import os
+import resource
 import subprocess
 import sys
 import tarfile
+import threading
 import time
+import zlib
 from zoneinfo import ZoneInfo
 
 import cv2
@@ -41,6 +45,7 @@ STEP = 5          # Minuten zwischen zwei DWD-Bildern
 SUB = 5           # Unterteilung je Schritt (= 4 Zwischenbilder)
 POLL = 60         # Sekunden zwischen zwei Prüfungen auf neue Daten
 STALE_AFTER = 30 * 60   # ohne neue Daten: Sensor "nicht verfügbar"
+REGEN_KM2 = 20          # ab so viel Echo ≥ rain_threshold_dbz im Wand-Ausschnitt gilt er als nass (kleiner: Störflecken, kein Video)
 UA = {"User-Agent": "ha-wand-radar/0.1 (Home Assistant add-on)"}
 
 
@@ -222,6 +227,8 @@ def norm(d):
     return (np.clip((d - 5) / 50, 0, 1) * 255).astype(np.uint8)
 
 
+
+
 # ---------- ein Durchlauf ----------
 class Scene:
     """Bildausschnitt (Geo) gegen das DWD-Raster: Umprojektion, Grundkarte, Datenrand; compose() färbt ein Radarbild ein."""
@@ -242,36 +249,133 @@ class Scene:
         self.r0, self.r1 = int(row.min()) - 40, int(row.max()) + 40
         self.mapx = (col - self.c0).astype(np.float32)
         self.mapy = (row - self.r0).astype(np.float32)
+        self.gx, self.gy = np.meshgrid(np.arange(self.c1 - self.c0, dtype=np.float32), np.arange(self.r1 - self.r0, dtype=np.float32))
+        self.im_bild = np.zeros(self.gx.shape, bool)                 # DWD-Pixel (1 km²), die im Wand-Bild liegen
+        self.im_bild[np.round(self.mapy).astype(int), np.round(self.mapx).astype(int)] = True
 
         base, ref = geo.maps()
         # Datenrand (z. B. IJsselmeer): Radar über ~10 km weich ausblenden, außerhalb die Karte leicht abdunkeln
         cov = cv2.remap(cover[self.r0:self.r1, self.c0:self.c1].astype(np.float32), self.mapx, self.mapy, cv2.INTER_LINEAR, borderValue=0)
         cov = cv2.GaussianBlur(cov, (0, 0), 18)
-        self.fade = np.clip(cov * 2 - 1, 0, 1)[..., None]
-        self.base = base * (0.75 + 0.25 * np.clip(cov * 2, 0, 1)[..., None])
+        fade = np.clip(cov * 2 - 1, 0, 1)[..., None]
+        base = base * (0.75 + 0.25 * np.clip(cov * 2, 0, 1)[..., None])
         hx, hy = tr.transform(geo.lon, geo.lat)
         self.hc, self.hr = (hx - xul) / 1000 - 0.5 - self.c0, (yul - hy) / 1000 - 0.5 - self.r0
 
-        self.ref = ref
-        self.la = ref[..., 3:4] * 0.4                                # Ortsnamen ÜBER dem Radar
-        self.dry = (np.clip(self.base * (1 - self.la) + ref[..., :3] * self.la, 0, 1) * 255).astype(np.uint8)   # Karte ohne Regen
-        self.lut_rgb, self.lut_a = LUT[:, :3], LUT[:, 3:4] * 0.9
+        la = ref[..., 3:4] * 0.4                                     # Ortsnamen ÜBER dem Radar
+        dryf = base * (1 - la) + ref[..., :3] * la                   # Karte ohne Regen
+        self.dry = (np.clip(dryf, 0, 1) * 255).astype(np.uint8)
+        # Einfärben (seit 0.20.0, Formel wie bis 0.19.0, nur umgestellt):
+        #   Bild = (Karte·(1−a) + Farbe·a)·(1−la) + Namen·la, a = Deckkraft(dBZ)·0,9·fade
+        #        = Karte_trocken + g·(Deckkraft·Farbe) − Deckkraft·(g·Karte),   g = fade·(1−la) je Pixel
+        # Die dBZ-Stufe (0,25 dB) wird ein uint8-Index k (0 = ≤ 8 dBZ = trocken), Deckkraft·Farbe und Deckkraft kommen per cv2.LUT.
+        g = (fade * (1 - la)).astype(np.float32)
+        self._dryf = (dryf * 255).astype(np.float32)
+        self._g3 = np.ascontiguousarray(np.repeat(g, 3, axis=2))
+        self._gb = (g * base * 255).astype(np.float32)
+        i0 = int(round((STOPS[0][0] + 10) * 4))                      # LUT-Zeile von 8 dBZ
+        i = np.minimum(np.arange(256), len(LUT) - 1 - i0) + i0
+        deck = LUT[i, 3] * 0.9
+        self._lut_farbe = (deck[:, None] * LUT[i, :3] * 255).astype(np.float32).reshape(1, 256, 3)
+        self._lut_deck = np.ascontiguousarray(np.repeat(deck.astype(np.float32).reshape(1, 256, 1), 3, axis=2))
 
     def crop(self, frames):
         return [f[self.r0:self.r1, self.c0:self.c1] for f in frames]
 
     def compose(self, dbz_crop):
-        """Nur Pixel mit Regen werden gerechnet, der Rest kommt fertig aus dry (spart auf schwachen Rechnern das meiste)."""
+        """Ein Radarbild (dBZ, Ausschnitt) einfärben: Karte darunter, Ortsnamen darüber. Ganz trocken → das fertige Kartenbild
+        (dasselbe Objekt, nicht verändern). Seit 0.20.0 ganz in OpenCV, ≈ 15× schneller als die NumPy-Fassung, Abweichung ≤ 1/255."""
+        if float(dbz_crop.max()) <= STOPS[0][0]:
+            return self.dry
         d = cv2.remap(dbz_crop, self.mapx, self.mapy, cv2.INTER_LINEAR, borderValue=-10)
-        ys, xs = np.nonzero(d > STOPS[0][0])
-        img = self.dry.copy()
-        if len(ys):
-            idx = np.clip(np.round((d[ys, xs] + 10) * 4), 0, 320).astype(np.int32)
-            a = self.lut_a[idx] * self.fade[ys, xs]
-            la = self.la[ys, xs]
-            out = (self.base[ys, xs] * (1 - a) + self.lut_rgb[idx] * a) * (1 - la) + self.ref[ys, xs, :3] * la
-            img[ys, xs] = (np.clip(out, 0, 1) * 255).astype(np.uint8)
-        return img
+        k = cv2.convertScaleAbs(np.maximum(d, STOPS[0][0]), alpha=4, beta=-4 * STOPS[0][0])     # Stufe über 8 dBZ, 0 … 255
+        k3 = cv2.merge([k, k, k])
+        out = cv2.subtract(cv2.add(self._dryf, cv2.multiply(self._g3, cv2.LUT(k3, self._lut_farbe))),
+                           cv2.multiply(cv2.LUT(k3, self._lut_deck), self._gb))
+        return cv2.convertScaleAbs(out)
+
+    def nass_km2(self, dbz_crop, thr):
+        """Fläche in km² mit Echo ≥ thr im Wand-Ausschnitt (genau das Bild des Videos)."""
+        if float(dbz_crop.max()) < thr:
+            return 0
+        return int(np.count_nonzero((dbz_crop >= thr) & self.im_bild))
+
+    def fluss(self, bewegung, gebiet):
+        """Bewegungsfeld der eigenen Vorhersage (2 km im Rechengebiet, 2-km-Pixel je 5 min) auf den Ausschnitt (1 km): (fx, fy) oder None."""
+        if bewegung is None or gebiet is None:
+            return None
+        V = cv2.resize(bewegung, (bewegung.shape[1] * 2, bewegung.shape[0] * 2), interpolation=cv2.INTER_LINEAR) * 2   # wie prognose.verlagern
+        r0, c0, h, w = self.r0 - gebiet.r0, self.c0 - gebiet.c0, self.r1 - self.r0, self.c1 - self.c0
+        if r0 < 0 or c0 < 0 or r0 + h > V.shape[0] or c0 + w > V.shape[1]:
+            return None
+        V = V[r0:r0 + h, c0:c0 + w].astype(np.float32)
+        return np.ascontiguousarray(V[..., 0]), np.ascontiguousarray(V[..., 1])
+
+    def zwischen(self, a, b, n, fluss=None):
+        """n − 1 Zwischenbilder von a nach b: beide Bilder entlang des Flusses verschoben und überblendet. Fluss = Bewegungsfeld der
+        eigenen Vorhersage (Vorhersageteil, seit 0.20.0) oder per Optical Flow (Farneback) aus a und b geschätzt (Vergangenheit, DWD)."""
+        if float(a.max()) <= STOPS[0][0] and float(b.max()) <= STOPS[0][0]:
+            return [a] * (n - 1)                                         # beide trocken: alles Karte
+        if fluss is None:
+            flow = cv2.calcOpticalFlowFarneback(norm(a), norm(b), None, 0.5, 4, 21, 3, 7, 1.5, 0)
+            fx, fy = flow[..., 0], flow[..., 1]
+        else:
+            fx, fy = fluss
+        out = []
+        for s in range(1, n):
+            f = s / n
+            A = cv2.remap(a, self.gx - f * fx, self.gy - f * fy, cv2.INTER_LINEAR, borderValue=-10)
+            B = cv2.remap(b, self.gx + (1 - f) * fx, self.gy + (1 - f) * fy, cv2.INTER_LINEAR, borderValue=-10)
+            out.append((1 - f) * A + f * B)
+        return out
+
+
+class Bildspeicher:
+    """Eingefärbte Bilder der Vergangenheit (Analysen + Zwischenbilder) von Lauf zu Lauf (seit 0.20.0): Sie ändern sich nicht mehr, jeder
+    Lauf rechnet nur das neue Paar (letzte Analyse → jetzt). Gespeichert als XOR gegen die Karte, zlib-gepackt (trocken ≈ 0, starker
+    Regen ≈ 1 MB je Bild). Hält auch die Scene; beides gilt, solange Ausschnitt und Radar-Abdeckung gleich bleiben. Die Abdeckung
+    ändert sich fast jeden Lauf um einzelne Pixel (Störechos); erst ab COVER_NEU geänderten Pixeln im Ausschnitt wird neu gebaut
+    (ein Pixel ändert die weich gezeichnete Randblende um < 0,1 %)."""
+    COVER_NEU = 100
+
+    def __init__(self):
+        self.schluessel, self.sc, self.cover, self.bilder = None, None, None, {}
+
+    def scene(self, geo, where, cover):
+        k = repr((geo.z, geo.w, geo.h, geo.cx, geo.cy, sorted(where.items())))
+        if k == self.schluessel and self.sc is not None:
+            c = cover[self.sc.r0:self.sc.r1, self.sc.c0:self.sc.c1]
+            if c.shape == self.cover.shape and int(np.count_nonzero(c != self.cover)) <= self.COVER_NEU:
+                return self.sc
+        self.schluessel, self.sc, self.bilder = k, Scene(geo, where, cover), {}
+        self.cover = cover[self.sc.r0:self.sc.r1, self.sc.c0:self.sc.c1].copy()
+        return self.sc
+
+    def hole(self, key):
+        z = self.bilder.get(key)
+        if z is None:
+            return None
+        if not z:
+            return self.sc.dry
+        return cv2.bitwise_xor(np.frombuffer(zlib.decompress(z), np.uint8).reshape(self.sc.dry.shape), self.sc.dry)
+
+    def lege(self, key, img):
+        self.bilder[key] = b"" if img is self.sc.dry else zlib.compress(cv2.bitwise_xor(img, self.sc.dry).tobytes(), 1)
+
+    def aufraeumen(self, ab_epoch):
+        for k in [k for k in self.bilder if k[0] < ab_epoch]:
+            del self.bilder[k]
+
+    def mb(self):
+        return sum(len(z) for z in self.bilder.values()) / 1e6
+
+
+class Lauf:
+    """Alles, was ein Video auf Abruf braucht, ohne neu zu laden (letzter Lauf, im Speicher bis zum nächsten)."""
+
+    def __init__(self, t0, times, crop, echt, now, sc, fluss, meta):
+        self.t0, self.times, self.crop, self.echt, self.now, self.sc, self.fluss, self.meta = t0, times, crop, echt, now, sc, fluss, meta
+        self.epochs = [int(t.timestamp()) for t in times]
 
 
 def panel_geometry(cfg, lat, lon):
@@ -304,12 +408,85 @@ def dwd_felder(forecast):
     return {m: read_h5(b)[0] for m, b in forecast.items() if m > 0}
 
 
-def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd"):
+def tmp_pfad(out_dir, name):
+    return os.path.join(out_dir, "." + name + ".tmp")
+
+
+def meta_schreiben(out_dir, meta):
+    open(tmp_pfad(out_dir, "meta.json"), "w").write(json.dumps(meta, ensure_ascii=False))
+    os.replace(tmp_pfad(out_dir, "meta.json"), os.path.join(out_dir, "meta.json"))    # zuletzt: Karte lädt erst danach neu
+
+
+def video_schreiben(cfg, lauf, speicher, pfad):
+    """radar.mp4 aus dem Lauf: je 5-min-Schritt das Bild und SUB − 1 Zwischenbilder, eingefärbt, an ffmpeg (H.264).
+    Fertige Bilder der Vergangenheit kommen aus dem Bildspeicher, neue landen dort."""
+    sc, crop, now, ep, W, H, fps = lauf.sc, lauf.crop, lauf.now, lauf.epochs, cfg["width"], cfg["height"], cfg["fps"]
+    cpu0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    ff = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
+                           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
+                           "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+                           "-crf", "24", "-preset", cfg["preset"], "-tune", "animation", "-g", str(SUB + 1),
+                           "-movflags", "+faststart", "-f", "mp4", pfad], stdin=subprocess.PIPE)
+    z = {"flow": 0.0, "comp": 0.0, "write": 0.0, "speicher": 0}
+
+    def put(img):
+        t = time.time()
+        ff.stdin.write(memoryview(np.ascontiguousarray(img)))
+        z["write"] += time.time() - t
+
+    def bild(key, fertig, dbz):
+        if fertig:
+            img = speicher.hole(key)
+            if img is not None:
+                z["speicher"] += 1
+                return img
+        t = time.time()
+        img = sc.compose(dbz)
+        z["comp"] += time.time() - t
+        if fertig:
+            speicher.lege(key, img)
+        return img
+
+    try:
+        for k in range(len(crop)):
+            put(bild((ep[k], 0), k <= now and lauf.echt[k], crop[k]))
+            if k == len(crop) - 1:
+                break
+            fertig = k + 1 <= now and lauf.echt[k] and lauf.echt[k + 1]           # Paar liegt ganz in der Vergangenheit
+            keys = [(ep[k], s) for s in range(1, SUB)]
+            imgs = [speicher.hole(key) for key in keys] if fertig else [None]
+            if all(i is not None for i in imgs):
+                z["speicher"] += len(imgs)
+                for i in imgs:
+                    put(i)
+                continue
+            t = time.time()
+            mids = sc.zwischen(crop[k], crop[k + 1], SUB, None if k < now else lauf.fluss)
+            z["flow"] += time.time() - t
+            for key, m in zip(keys, mids):
+                put(bild(key, fertig, m))
+    finally:
+        try:
+            ff.stdin.close()
+        except OSError:
+            pass
+    t = time.time()
+    if ff.wait() != 0:
+        raise RuntimeError("ffmpeg fehlgeschlagen")
+    cpu1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    log(f"Zeiten: Zwischenbilder {z['flow']:.1f} s, Einfärben {z['comp']:.1f} s, aus Speicher {z['speicher']} Bilder ({speicher.mb():.0f} MB), "
+        f"an ffmpeg {z['write']:.1f} s, warten {time.time() - t:.1f} s, ffmpeg-CPU {cpu1.ru_utime + cpu1.ru_stime - cpu0.ru_utime - cpu0.ru_stime:.1f} s")
+
+
+def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd", speicher=None, bewegung=None, ruc_regen=None):
     """now_h5: (dBZ, Abdeckung, where) der Analyse; fields: {Minuten: dBZ} für +5 … +120 (eigene oder DWD-Vorhersage).
-    Schreibt still.jpg, radar.mp4, meta.json (und still_panel.jpg, wenn panel_geo gesetzt); gibt meta zurück."""
-    W, H = geo.w, geo.h
+    bewegung: (Bewegungsfeld, Rechengebiet) der eigenen Vorhersage für die Zwischenbilder, ruc_regen(kasten, maske, km²): RUC-Regen im Ausschnitt.
+    Schreibt still.jpg, meta.json (und still_panel.jpg, wenn panel_geo gesetzt), radar.mp4 nur bei Regen im Wand-Ausschnitt
+    (sonst video: false, ein altes Video wird gelöscht); gibt den Lauf (mit meta) zurück."""
+    speicher = speicher or Bildspeicher()
     tz = ZoneInfo(cfg["timezone"])
     n_past = cfg["past_minutes"] // STEP
+    thr = cfg["rain_threshold_dbz"]
 
     frames, times = [], []
     for k in range(n_past, 0, -1):                        # Vergangenheit
@@ -324,69 +501,40 @@ def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd"
         frames.append(fields[m])
         times.append(t0 + dt.timedelta(minutes=m))
     now = n_past
+    echt = [f is not None for f in frames]
     for k in range(len(frames)):                          # Lücken (fehlende DWD-Läufe) mit dem Nachbarbild füllen
         if frames[k] is None:
             src = next((frames[j] for j in list(range(k - 1, -1, -1)) + list(range(k + 1, len(frames))) if frames[j] is not None), None)
             frames[k] = src
     log(f"Bilder: {len(frames)}, {times[0]:%H:%M}Z … {times[-1]:%H:%M}Z, Vorhersage {prognose}")
 
-    sc = Scene(geo, where, cover)
+    sc = speicher.scene(geo, where, cover)
     crop = sc.crop(frames)
-    compose, hc, hr = sc.compose, sc.hc, sc.hr
-
-    gx, gy = np.meshgrid(np.arange(crop[0].shape[1], dtype=np.float32), np.arange(crop[0].shape[0], dtype=np.float32))
-
-    def between(a, b, n):                                   # Zwischenbilder per Optical Flow (Farneback)
-        flow = cv2.calcOpticalFlowFarneback(norm(a), norm(b), None, 0.5, 4, 21, 3, 7, 1.5, 0)
-        fx, fy = flow[..., 0], flow[..., 1]
-        out = []
-        for s in range(1, n):
-            f = s / n
-            A = cv2.remap(a, gx - f * fx, gy - f * fy, cv2.INTER_LINEAR, borderValue=-10)
-            B = cv2.remap(b, gx + (1 - f) * fx, gy + (1 - f) * fy, cv2.INTER_LINEAR, borderValue=-10)
-            out.append((1 - f) * A + f * B)
-        return out
 
     os.makedirs(out_dir, exist_ok=True)
-    tmp = lambda name: os.path.join(out_dir, "." + name + ".tmp")
-    Image.fromarray(compose(crop[now])).save(tmp("still.jpg"), format="JPEG", quality=88)
+    tmp = lambda name: tmp_pfad(out_dir, name)
+    still = sc.compose(crop[now])
+    Image.fromarray(still).save(tmp("still.jpg"), format="JPEG", quality=88)
+    speicher.lege((int(t0.timestamp()), 0), still)       # dasselbe Bild ist im Video „jetzt“ und ab dem nächsten Lauf Vergangenheit
+    speicher.aufraeumen(int(times[0].timestamp()))       # älter als der Anfang des Videos: weg (auch in langen Trockenphasen)
     panel_still = render_panel_still(cfg, panel_geo, where, cover, frames[now], tmp("still_panel.jpg")) if panel_geo else False
 
-    fps = cfg["fps"]
-    ff = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
-                           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(fps), "-i", "-",
-                           "-c:v", "libx264", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
-                           "-crf", "24", "-preset", cfg["preset"], "-tune", "animation", "-g", str(SUB + 1),
-                           "-movflags", "+faststart", "-f", "mp4", tmp("radar.mp4")], stdin=subprocess.PIPE)
-    t_flow = t_comp = t_write = 0.0
-
-    def put(dbz):
-        nonlocal t_comp, t_write
-        t = time.time()
-        raw = compose(dbz).tobytes()
-        t_comp += time.time() - t
-        t = time.time()
-        ff.stdin.write(raw)
-        t_write += time.time() - t
-
-    for k in range(len(crop)):
-        put(crop[k])
-        if k < len(crop) - 1:
-            t = time.time()
-            mids = between(crop[k], crop[k + 1], SUB)
-            t_flow += time.time() - t
-            for m in mids:
-                put(m)
-    t = time.time()
-    ff.stdin.close()
-    if ff.wait() != 0:
-        raise RuntimeError("ffmpeg fehlgeschlagen")
-    log(f"Zeiten: Zwischenbilder {t_flow:.0f} s, Einfärben {t_comp:.0f} s, an ffmpeg {t_write:.0f} s, Rest {time.time() - t:.0f} s")
-
     # Kennzahlen am Zuhause-Punkt (größter Wert im 5×5-km-Feld)
-    y, x = int(round(hr)), int(round(hc))
+    y, x = int(round(sc.hr)), int(round(sc.hc))
     series = [round(float(f[y - 2:y + 3, x - 2:x + 3].max()), 1) for f in crop]
-    thr = cfg["rain_threshold_dbz"]
+    fps = cfg["fps"]
+
+    # Trocken (Entscheidung 16.11.2026): im Wand-Ausschnitt kein Echo ≥ Schwelle jetzt (ab REGEN_KM2, kleinere Flecken sind meist Störechos),
+    # keins in den Vorhersagebildern, RUC dort ohne Regen in 2 h und am Zuhause-Punkt kein Regen → kein vorgerechnetes Video
+    # (▶ fordert es auf Abruf an).
+    km2 = [sc.nass_km2(c, thr) for c in crop[now:]]
+    grund = [n for n, ja in (("Zuhause", any(v >= thr for v in series[now:])),
+                             (f"jetzt {km2[0]} km²", km2[0] >= REGEN_KM2),
+                             (f"Vorhersage bis {max(km2[1:], default=0)} km²", max(km2[1:], default=0) >= REGEN_KM2),
+                             ("RUC", bool(ruc_regen and ruc_regen((sc.r0, sc.r1, sc.c0, sc.c1), sc.im_bild, REGEN_KM2)))) if ja]
+    video = bool(grund)
+    log("Wand-Ausschnitt: Regen (" + ", ".join(grund) + ") → Video" if video else
+        f"Wand-Ausschnitt: trocken (jetzt {km2[0]} km², Vorhersage bis {max(km2[1:], default=0)} km²) → kein Video, ▶ rechnet auf Abruf")
     loc = lambda t: t.astimezone(tz)
     hhmm = lambda t: loc(t).strftime("%H:%M")
     rain = [v >= thr for v in series]
@@ -410,25 +558,46 @@ def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd"
         "summe_mm": round(sum(mmh[k] for k in rng) * STEP / 60, 2),
         "verlauf": mmh[now:now + 24],    # mm/h am Zuhause-Punkt ab jetzt, ein Wert je Schritt (STEP min)
         "prognose": prognose,            # Quelle der Vorhersage dieses Laufs: eigen (DA50) oder dwd (WN)
+        "video": video,                  # seit 0.20.0: false = kein radar.mp4 (trocken), die Karte fordert es per button.wand_radar_video an
     }
-    for name in ("still.jpg", "radar.mp4") + (("still_panel.jpg",) if panel_still else ()):
+    lauf = Lauf(t0, times, crop, echt, now, sc, sc.fluss(*bewegung) if bewegung else None, meta)
+    if video:
+        video_schreiben(cfg, lauf, speicher, tmp("radar.mp4"))
+    for name in ("still.jpg",) + (("radar.mp4",) if video else ()) + (("still_panel.jpg",) if panel_still else ()):
         os.replace(tmp(name), os.path.join(out_dir, name))
-    if not panel_still:      # Option aus oder Fehler: ein altes Panel-Bild darf nicht unter neuen Zeiten stehen bleiben
-        try:
-            os.remove(os.path.join(out_dir, "still_panel.jpg"))
-        except OSError:
-            pass
-    open(tmp("meta.json"), "w").write(json.dumps(meta, ensure_ascii=False))
-    os.replace(tmp("meta.json"), os.path.join(out_dir, "meta.json"))    # zuletzt: Karte lädt erst danach neu
-    return meta
+    for name, weg in (("radar.mp4", not video), ("still_panel.jpg", not panel_still)):
+        if weg:              # kein Video (trocken) bzw. Panel-Option aus oder Fehler: nichts Altes unter neuen Zeiten stehen lassen
+            try:
+                os.remove(os.path.join(out_dir, name))
+            except OSError:
+                pass
+    meta_schreiben(out_dir, meta)
+    return lauf
 
 
-# ---------- MQTT-Sensor ----------
+def video_auf_abruf(cfg, lauf, speicher, out_dir):
+    """▶ bei Trockenheit (button.wand_radar_video): Video aus dem letzten Lauf rechnen, nichts neu laden. Gilt bis zum nächsten Lauf."""
+    if lauf is None:
+        log("Video auf Abruf: noch kein Lauf seit dem Start")
+        return
+    if lauf.meta.get("video"):
+        log(f"Video auf Abruf: für Lauf {lauf.meta['t0']} liegt schon eins vor")
+        return
+    t = time.time()
+    video_schreiben(cfg, lauf, speicher, tmp_pfad(out_dir, "radar.mp4"))
+    os.replace(tmp_pfad(out_dir, "radar.mp4"), os.path.join(out_dir, "radar.mp4"))
+    lauf.meta = dict(lauf.meta, video=True, version=lauf.meta["t0_epoch"] + 1, generated=int(time.time()))   # +1: nie gleich einem t0
+    meta_schreiben(out_dir, lauf.meta)
+    log(f"Video auf Abruf für Lauf {lauf.meta['t0']}: fertig in {time.time() - t:.1f} s")
+
+
+# ---------- MQTT: Sensor und Knopf ----------
 class Mqtt:
     BASE = "wand_radar"
 
     def __init__(self):
         self.client = None
+        self.abruf = threading.Event()        # button.wand_radar_video gedrückt
 
     def connect(self):
         import paho.mqtt.client as mqtt
@@ -439,6 +608,7 @@ class Mqtt:
             c.tls_set()
         c.will_set(f"{self.BASE}/availability", "offline", retain=True)
         c.on_connect = lambda cl, u, f, rc, p=None: self.discover(cl)
+        c.on_message = lambda cl, u, msg: self.abruf.set() if msg.topic == f"{self.BASE}/video/set" else None
         c.connect_async(s["host"], int(s["port"]), 60)
         c.loop_start()
         self.client = c
@@ -451,6 +621,11 @@ class Mqtt:
             "state_topic": f"{self.BASE}/state", "value_template": "{{ value_json.regen_ab_iso }}",
             "json_attributes_topic": f"{self.BASE}/state",
             "availability_topic": f"{self.BASE}/availability", "device": dev}), retain=True)
+        c.publish("homeassistant/button/wand_radar/video/config", json.dumps({          # seit 0.20.0: Video auf Abruf
+            "name": "Video rechnen", "unique_id": "wand_radar_video", "default_entity_id": "button.wand_radar_video",
+            "icon": "mdi:play-circle-outline", "command_topic": f"{self.BASE}/video/set", "payload_press": "PRESS",
+            "availability_topic": f"{self.BASE}/availability", "device": dev}), retain=True)
+        c.subscribe(f"{self.BASE}/video/set")
         c.publish(f"{self.BASE}/availability", "online", retain=True)
 
     def publish(self, meta):
@@ -496,6 +671,8 @@ def main():
     publish_card(out_dir)
     arch = archiv.start(cfg, (lat, lon), read_h5, log)     # nur Messphase der eigenen Vorhersage (archiv_tage, prognose_test)
     eigen = vorhersage.Vorhersage(cfg, (lat, lon), read_h5, past_blob, log) if cfg["prognose"] != "dwd" else None
+    speicher = Bildspeicher()
+    letzter = None                                   # letzter Lauf, für das Video auf Abruf
     mq = Mqtt()
     if "SUPERVISOR_TOKEN" in os.environ:
         try:
@@ -523,8 +700,15 @@ def main():
                 else:
                     etag, last_ok = None, time.time()
             if pausiert:
+                mq.abruf.clear()                     # in der Pause gibt es kein Video auf Abruf
                 time.sleep(POLL)
                 continue
+        if mq.abruf.is_set():
+            mq.abruf.clear()
+            try:
+                video_auf_abruf(cfg, letzter, speicher, out_dir)
+            except Exception as e:
+                log("Video auf Abruf fehlgeschlagen:", repr(e))
         try:
             h = requests.head(latest, headers=UA, timeout=30)
             h.raise_for_status()
@@ -548,14 +732,17 @@ def main():
                         quelle = "eigen" if fields is not None else "dwd"
                     if fields is None:
                         fields = dwd_felder(forecast)
-                    meta = render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo, quelle)
+                    letzter = render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo, quelle, speicher,
+                                     bewegung=(eigen.bewegung, eigen.gebiet) if quelle == "eigen" else None,
+                                     ruc_regen=(lambda *a, t0=t0: eigen.ruc_regen(t0, *a)) if eigen else None)
+                    meta = letzter.meta
                     mq.publish(meta)
                     if arch:
                         arch.neuer_lauf(t0, forecast)
                     clean_past(cfg, t0)
                     last_t0 = t0
-                    log(f"fertig in {time.time() - started:.0f} s: Lauf {meta['t0']}, Vorhersage {quelle}, "
-                        f"Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")
+                    log(f"fertig in {time.time() - started:.1f} s: Lauf {meta['t0']}, Vorhersage {quelle}, "
+                        f"Video {'ja' if meta['video'] else 'nein'}, Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")
                 etag = new
                 last_ok = time.time()
             else:
@@ -565,8 +752,10 @@ def main():
             if time.time() - last_ok > STALE_AFTER:
                 mq.offline()
         if once:
+            if "--abruf" in sys.argv:                # Test: danach ▶ bei Trockenheit wie über button.wand_radar_video
+                video_auf_abruf(cfg, letzter, speicher, out_dir)
             break
-        time.sleep(POLL)
+        mq.abruf.wait(POLL)                          # wacht früher auf, wenn ▶ ein Video anfordert
 
 
 if __name__ == "__main__":

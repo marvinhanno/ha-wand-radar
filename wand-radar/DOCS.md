@@ -5,9 +5,10 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
 1. Vergangenheit (−`past_minutes`) aus den gespeicherten Analysebildern früherer Läufe, „jetzt“ = Analyse des neuen Laufs, Vorhersage +5 … +120 min
    (seit 0.19.0) aus der **eigenen Vorhersage** (Option `prognose: eigen`, s. „Eigene Vorhersage“) oder aus der DWD-Vorhersage im Lauf (`prognose: dwd`, bis 0.18.0 immer).
 2. Umrechnung auf den Bildausschnitt (Web-Mercator, Zoom `zoom`, `width`×`height`, Mitte = Zone „Zuhause“ oder `latitude`/`longitude`).
-3. Einfärben (feste dBZ-Stützpunkte), je 5-min-Schritt 4 Zwischenbilder per Optical Flow, Grundkarte darunter, Ortsnamen darüber.
+3. Einfärben (feste dBZ-Stützpunkte), je 5-min-Schritt 4 Zwischenbilder, Grundkarte darunter, Ortsnamen darüber. Das Video entsteht seit 0.20.0
+   nur bei Regen im Bildausschnitt, sonst auf Abruf (s. „Video nur bei Regen, auf Abruf“).
 4. Ausgabe nach `output_dir` (Standard `/config/www/wand-radar`, im Browser unter `/local/wand-radar/`):
-   `still.jpg`, `radar.mp4`, `meta.json` (und `route.json`, s. u.; mit gesetzten `panel_width`/`panel_height` zusätzlich `still_panel.jpg`). Beim Start kommt außerdem die Dashboard-Karte `wand-radar-card.js` dazu
+   `still.jpg`, `radar.mp4` (seit 0.20.0 nur bei Regen bzw. auf Abruf), `meta.json` (und `route.json`, s. u.; mit gesetzten `panel_width`/`panel_height` zusätzlich `still_panel.jpg`). Beim Start kommt außerdem die Dashboard-Karte `wand-radar-card.js` dazu
    (Dashboard-Ressource `/local/wand-radar/wand-radar-card.js`, Kartentyp `custom:wand-radar`). Ab Karte 1.4 zeichnet sie auch die Route
    (Esri-Kacheln + SVG) mit Umschalter „Route | Radar“, wenn `route.json` aktiv ist und zu den HA-Helfern passt.
    Ab Karte 1.7 (App 0.7.0) zeichnet sie außerdem ein Training: Ist `training_show` (Standard `binary_sensor.wand_training_zeigen`) an und hat
@@ -27,6 +28,7 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt)
    und seit 0.19.0 `prognose` (`eigen` oder `dwd`: welche Vorhersage dieser Lauf tatsächlich genommen hat; steht auch in `meta.json`).
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
+   Seit 0.20.0 außerdem der Knopf `button.wand_radar_video` („Video rechnen“, MQTT-Discovery am selben Gerät): rechnet das Video zum letzten Lauf, wenn keins vorliegt.
 6. **Route** (eigener Thread, `route.py`, seit 0.3.0): schreibt jede Minute bei Bedarf `route.json` neben die Radardateien –
    die Strecke, die die Karte im Routenmodus als Hintergrund zeichnet. Gelesen werden die HA-Helfer `input_text.termin_koordinaten`,
    `input_datetime.termin_start`, `input_number.termin_fahrzeit`, `input_number.termin_puffer`, `input_text.wand_reise`,
@@ -46,6 +48,23 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
    - Sonst `{"aktiv": false}`. Fehler: alte Datei bleibt, Log `Route: …`, nach 5 min neuer Versuch.
 7. **Pause** (seit 0.6.0): Ist `pause_entity` gesetzt und `on` (z. B. nachts), holt und rechnet die App kein Radar und meldet den
    Sensor „nicht verfügbar“. Danach rechnet sie sofort neu (fehlende Vergangenheitsbilder holt sie beim DWD nach, ca. 2 min).
+
+## Video nur bei Regen, auf Abruf (seit 0.20.0)
+
+Das Video ist der größte Rechenposten (181 Bilder je Lauf). Es entsteht deshalb nur, wenn es etwas zeigt:
+
+- **Regen** = im Bildausschnitt (genau das Bild des Videos) mindestens 20 km² Echo ≥ `rain_threshold_dbz` jetzt oder in einem Vorhersagebild,
+  oder ICON-D2-RUC zeigt dort in den nächsten 2 h so viel, oder am Zuhause-Punkt regnet es in den nächsten 2 h. Kleinere Flecken sind meist Störechos.
+  Dann wie bisher bei jedem Lauf ein neues `radar.mp4`.
+- **Trocken** = nichts davon: Es entstehen nur `still.jpg`, `still_panel.jpg`, `meta.json` (`"video": false`) und der Sensor; ein altes `radar.mp4` wird gelöscht.
+  Die Karte (ab 1.20) drückt bei ▶ dann `button.wand_radar_video`; die App rechnet das Video aus den Bildern des letzten Laufs (nichts neu laden, wenige Sekunden),
+  schreibt `meta.json` mit `"video": true` und neuer `version` (t0 + 1), die Karte spielt ab. Das Abruf-Video gilt bis zum nächsten Lauf.
+- **Sparsamer gerechnet:** Einfärben ganz in OpenCV (Index-Bild + Tabellen statt NumPy je Regenpixel, ≈ 15× schneller, Abweichung ≤ 1/255);
+  eingefärbte Bilder der Vergangenheit bleiben von Lauf zu Lauf im Speicher (zlib, bei starkem Regen ≈ 85 MB, trocken wenige MB), jeder Lauf rechnet nur das
+  neue Paar; die Zwischenbilder der Vorhersage kommen direkt aus dem Bewegungsfeld der eigenen Vorhersage statt per Optical Flow. Log je Video:
+  `Zeiten: Zwischenbilder … s, Einfärben … s, aus Speicher n Bilder (… MB), an ffmpeg … s, warten … s, ffmpeg-CPU … s`, je Lauf `Wand-Ausschnitt: …`.
+
+Lokal: `WR_AT=… python wand-radar/wand_radar.py --abruf` rechnet einen Lauf und danach das Video wie über den Knopf.
 
 ## Eigene Vorhersage (seit 0.19.0)
 

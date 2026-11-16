@@ -1,4 +1,4 @@
-// wand-radar 1.19 (Routen- und Trainingsmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.20 (Routen- und Trainingsmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -21,8 +21,12 @@
 // - Haken für andere Karten (seit 1.18): (1) Das Fensterereignis „wand-radar-abspielen“ startet ▶ wie der eigene Knopf (nur die sichtbare Karte mit Radar-Daten
 //   reagiert; zeigt sie gerade Route/Training, schaltet sie erst aufs Radar). (2) Marke „Regen hh:mm“ auf der Zeitleiste an der Regenzeit aus regen_entity
 //   (Standard sensor.wand_radar_regen_ab, Zustand = Zeitstempel), nur wenn der Regen in < 2 h kommt und es noch nicht regnet; sie ersetzt dann die Flagge „Regen ab“.
+// - Video auf Abruf (seit 1.20, App 0.20.0): Ist es im Wand-Ausschnitt trocken, rechnet die App kein Video (meta.json video: false). ▶, Tippen auf die
+//   Zeitleiste und das Ereignis „wand-radar-abspielen“ drücken dann video_entity (button.wand_radar_video); solange dreht ein oranger Ring um ▶,
+//   daneben „Video wird gerechnet …“. Kommt nach abruf_sekunden (20) kein Video, steht dort ein Hinweis statt des Kreisels.
+//   Beschriftung „RADAR“ (eigene Vorhersage) bzw. „RADAR · DWD“ (meta.json prognose: dwd), bis 1.19 immer „RADAR · DWD“.
 // Konfiguration: type: custom:wand-radar, base: /local/wand-radar, regen_entity: sensor.wand_radar_regen_ab, max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
-//   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen
+//   training_entity: sensor.strava_latest_activity, training_show: binary_sensor.wand_training_zeigen, video_entity: button.wand_radar_video, abruf_sekunden: 20
 const WAND_WAKE_GAP = 90 * 1000;       // Takt (30 s) so lange ausgeblieben → Seite war eingefroren
 const WAND_WAKE_CHECK = 60 * 1000;     // so lange darf HA nach dem Aufwachen brauchen, bis neu geladen wird
 const WAND_KARTEN = new Set();         // verbundene wand-radar-Karten
@@ -161,6 +165,16 @@ const WR_CSS = `
   .btn .k { width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(17,19,23,.8); border: 1px solid rgba(255,255,255,.1); color: #d4d7dc; }
   .playing .btn .k { color: #ff9f0a; border-color: rgba(255,159,10,.45); }
   .btn svg { width: 22px; height: 22px; fill: currentColor; }
+  /* Video auf Abruf (1.20): drehender Ring um ▶ (Mockup A) */
+  .btn::before { content: ''; position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%; box-sizing: border-box;
+    border: 3px solid rgba(255,159,10,.18); border-top-color: #ff9f0a; border-right-color: #ff9f0a; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .laden .btn::before { opacity: 1; animation: wrdreh 1s linear infinite; }
+  .laden .btn .k { color: #ff9f0a; }
+  @keyframes wrdreh { to { transform: rotate(360deg); } }
+  .lbl .lade { display: none; color: #ff9f0a; font-size: 12px; letter-spacing: .02em; }
+  .laden .lbl .lade, .hinweis .lbl .lade { display: inline; }
+  .hinweis .lbl .lade { color: #b4b8bf; font-weight: 500; }
+  .laden .lbl .t, .laden .lbl .rel, .hinweis .lbl .t, .hinweis .lbl .rel { display: none; }
   .lbl { position: absolute; left: 92px; top: 14px; display: flex; align-items: baseline; gap: 10px; font-size: 11px; font-weight: 600; letter-spacing: .08em; color: #8b9099; white-space: nowrap; }
   .lbl .t { color: #d4d7dc; font-size: 11px; letter-spacing: .04em; transition: font-size .3s; font-variant-numeric: tabular-nums; }
   .playing .lbl .t { font-size: 20px; letter-spacing: 0; color: #f5f5f7; }
@@ -244,7 +258,7 @@ const WR_HTML = `<div id="root">
   <div class="msg" id="msg"></div>
   <div class="rl">
     <button class="btn" id="play" aria-label="Radar abspielen"><span class="k"><svg viewBox="0 0 24 24" id="ico"><path d="M8 5.14v14l11-7-11-7z"/></svg></span></button>
-    <div class="lbl"><span>RADAR · DWD</span><span class="t" id="tt"></span><span class="rel" id="rel"></span><span class="fc" id="fc">VORHERSAGE</span></div>
+    <div class="lbl"><span id="src">RADAR</span><span class="lade" id="lade"></span><span class="t" id="tt"></span><span class="rel" id="rel"></span><span class="fc" id="fc">VORHERSAGE</span></div>
     <button class="jetzt" id="jetzt" aria-label="Zurück zu jetzt"><svg viewBox="0 0 24 24"><path d="M13.5 8H12v5l4.3 2.5.7-1.2-3.5-2.1V8zM13 3a9 9 0 0 0-9 9H1l3.9 3.9L8.8 12H6a7 7 0 1 1 2.1 5l-1.4 1.4A9 9 0 1 0 13 3z"/></svg>Jetzt</button>
     <div class="rsum" id="rsum"></div>
     <div class="sw" id="sw"><button id="swRoute"><ha-icon icon="mdi:map-marker-path"></ha-icon>Route</button><button id="swRadar"><ha-icon icon="mdi:weather-pouring"></ha-icon>Radar</button></div>
@@ -347,7 +361,8 @@ function wrTempo(typ, km, min, pace) {       // Anzeige-Tempo je Sportart; leer,
 class WandRadar extends HTMLElement {
   setConfig(c) {
     this._cfg = Object.assign({ base: '/local/wand-radar', regen_entity: 'sensor.wand_radar_regen_ab', max_seconds: 60, stale_min: 20, stapel_sekunden: 60,
-      training_entity: 'sensor.strava_latest_activity', training_show: 'binary_sensor.wand_training_zeigen' }, c || {});
+      training_entity: 'sensor.strava_latest_activity', training_show: 'binary_sensor.wand_training_zeigen', video_entity: 'button.wand_radar_video',
+      abruf_sekunden: 20 }, c || {});
   }
   set hass(h) {
     this._hass = h;
@@ -387,7 +402,7 @@ class WandRadar extends HTMLElement {
         vid.currentTime = p * this._total();
         this._show(vid.currentTime, false);
       };
-      tr.addEventListener('pointerdown', (e) => { e.stopPropagation(); this._scrub = true; this._hold(); try { tr.setPointerCapture(e.pointerId); } catch (_) { /* synthetische Ereignisse */ } seek(e); });
+      tr.addEventListener('pointerdown', (e) => { e.stopPropagation(); if (this._ohneVideo()) { this._abruf(); return; } this._scrub = true; this._hold(); try { tr.setPointerCapture(e.pointerId); } catch (_) { /* synthetische Ereignisse */ } seek(e); });
       tr.addEventListener('pointermove', (e) => { if (this._scrub) { seek(e); this._touch(); } });
       tr.addEventListener('pointerup', () => { if (!this._scrub) return; this._scrub = false; this._setState('angehalten'); });
       tr.addEventListener('pointercancel', () => { this._scrub = false; });
@@ -413,7 +428,7 @@ class WandRadar extends HTMLElement {
   }
   disconnectedCallback() {
     window.removeEventListener('wand-radar-abspielen', this._onAbspielen);
-    clearInterval(this._poll); clearTimeout(this._stapelT); clearTimeout(this._auto); clearTimeout(this._holdT); clearTimeout(this._rauto); wandSeiten(false);
+    clearInterval(this._poll); clearInterval(this._ladeT); clearTimeout(this._hinweisT); this._laden = false; clearTimeout(this._stapelT); clearTimeout(this._auto); clearTimeout(this._holdT); clearTimeout(this._rauto); wandSeiten(false);
     document.documentElement.style.setProperty('--wand-mitte', '1');
     window.__wandActive = Math.max(0, (window.__wandActive || 1) - 1);
     WAND_KARTEN.delete(this);
@@ -443,8 +458,10 @@ class WandRadar extends HTMLElement {
     this._$('msg').textContent = '';
     const v = `?v=${m.version}`;
     this._$('still').src = `${this._cfg.base}/still.jpg${v}`;
+    this._$('src').textContent = m.prognose === 'dwd' ? 'RADAR · DWD' : 'RADAR';
     const vid = this._$('vid');
-    vid.src = `${this._cfg.base}/radar.mp4${v}`; vid.load();
+    if (m.video === false) { vid.removeAttribute('src'); vid.load(); }     // trocken: kein Video vorgerechnet (▶ fordert es an)
+    else { vid.src = `${this._cfg.base}/radar.mp4${v}`; vid.load(); }
     const span = m.times.length - 1, nowF = m.now_index / span, $ = this._$;
     $('past').style.width = (nowF * 100) + '%'; $('fut').style.left = (nowF * 100) + '%'; $('now').style.left = (nowF * 100) + '%';
     const tk = $('ticks'); tk.innerHTML = '';
@@ -737,9 +754,40 @@ class WandRadar extends HTMLElement {
     this._show(this._$('vid').currentTime, false);
     requestAnimationFrame(() => this._tick());
   }
+  // ---- Video auf Abruf (seit 1.20) ----
+  _ohneVideo() { return !!(this._meta && this._meta.video === false); }
+  _abruf() {
+    if (this._laden) return;
+    const h = this._hass, ent = this._cfg.video_entity;
+    if (!h || !h.states[ent] || h.states[ent].state === 'unavailable') { this._hinweis('Video gerade nicht möglich'); return; }
+    clearTimeout(this._hinweisT); this._root.classList.remove('hinweis');
+    this._laden = true; this._root.classList.add('laden'); this._$('lade').textContent = 'Video wird gerechnet …';
+    const t0 = Date.now();
+    Promise.resolve().then(() => h.callService('button', 'press', { entity_id: ent })).catch(() => {});
+    clearInterval(this._ladeT);
+    this._ladeT = setInterval(() => {
+      if (!this._laden) { clearInterval(this._ladeT); return; }
+      if (Date.now() - t0 > (this._cfg.abruf_sekunden || 20) * 1000) { this._ladenEnde(); this._hinweis('Video kommt gerade nicht – später noch einmal ▶'); return; }
+      fetch(`${this._cfg.base}/meta.json?t=${Date.now()}`, { cache: 'no-store' })
+        .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+        .then((m) => {
+          if (!this._laden || !m || m.video === false) return;          // noch nicht fertig (oder ein neuer trockener Lauf: weiter warten)
+          this._ladenEnde();
+          this._pending = m; this._apply();
+          if (this._meta === m) this._play();
+        })
+        .catch(() => { /* nächster Versuch */ });
+    }, 1500);
+  }
+  _ladenEnde() { this._laden = false; clearInterval(this._ladeT); this._root.classList.remove('laden'); }
+  _hinweis(t) {
+    this._$('lade').textContent = t; this._root.classList.add('hinweis');
+    clearTimeout(this._hinweisT); this._hinweisT = setTimeout(() => this._root.classList.remove('hinweis'), 8000);
+  }
   _play() {
     const vid = this._$('vid');
     if (!this._meta) return;
+    if (this._ohneVideo()) { this._abruf(); return; }
     if (this._state === 'ruhe' || vid.ended || vid.currentTime >= this._total() - 0.05) vid.currentTime = 0;
     clearTimeout(this._holdT); this._setState('laeuft');
     const p = vid.play(); if (p && p.catch) p.catch(() => this._hold());
