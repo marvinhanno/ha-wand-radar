@@ -59,10 +59,11 @@ Das Video ist der größte Rechenposten (181 Bilder je Lauf). Es entsteht deshal
 - **Trocken** = nichts davon: Es entstehen nur `still.jpg`, `still_panel.jpg`, `meta.json` (`"video": false`) und der Sensor; ein altes `radar.mp4` wird gelöscht.
   Die Karte (ab 1.20) drückt bei ▶ dann `button.wand_radar_video`; die App rechnet das Video aus den Bildern des letzten Laufs (nichts neu laden, wenige Sekunden),
   schreibt `meta.json` mit `"video": true` und neuer `version` (t0 + 1), die Karte spielt ab. Das Abruf-Video gilt bis zum nächsten Lauf.
-- **Sparsamer gerechnet:** Einfärben ganz in OpenCV (Index-Bild + Tabellen statt NumPy je Regenpixel, ≈ 15× schneller, Abweichung ≤ 1/255);
+- **Sparsamer gerechnet:** Einfärben über ein Index-Bild und Tabellen; bis 5 % Regenpixel nur diese, darüber das ganze Bild in OpenCV (bei viel Regen ≈ 6–15× schneller, Abweichung ≤ 1/255);
   eingefärbte Bilder der Vergangenheit bleiben von Lauf zu Lauf im Speicher (zlib, bei starkem Regen ≈ 85 MB, trocken wenige MB), jeder Lauf rechnet nur das
   neue Paar; die Zwischenbilder der Vorhersage kommen direkt aus dem Bewegungsfeld der eigenen Vorhersage statt per Optical Flow. Log je Video:
-  `Zeiten: Zwischenbilder … s, Einfärben … s, aus Speicher n Bilder (… MB), an ffmpeg … s, warten … s, ffmpeg-CPU … s`, je Lauf `Wand-Ausschnitt: …`.
+  `Zeiten: Zwischenbilder … s, Einfärben … s, aus Speicher n Bilder (… MB), an ffmpeg … s, warten … s, ffmpeg-CPU … s`, je Lauf `Wand-Ausschnitt: …` und
+  `fertig in … s (CPU … s mit ffmpeg)` (seit 0.20.1; die CPU-Zeit ist das Maß für den Strom, auf 2 Kernen teilen sich Einfärben und ffmpeg die Wandzeit).
 
 Lokal: `WR_AT=… python wand-radar/wand_radar.py --abruf` rechnet einen Lauf und danach das Video wie über den Knopf.
 

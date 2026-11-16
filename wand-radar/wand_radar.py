@@ -53,6 +53,12 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 
+def cpu_s():
+    """Verbrauchte CPU-Zeit dieses Prozesses samt beendeter Kindprozesse (ffmpeg) in s – das Maß für den Strom, nicht die Wandzeit."""
+    a, b = resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)
+    return a.ru_utime + a.ru_stime + b.ru_utime + b.ru_stime
+
+
 # ---------- Konfiguration ----------
 def load_config():
     """Add-on-Optionen aus /data/options.json, lokal aus Umgebungsvariablen (WR_*)."""
@@ -282,13 +288,26 @@ class Scene:
     def crop(self, frames):
         return [f[self.r0:self.r1, self.c0:self.c1] for f in frames]
 
+    VOLLBILD_AB = 0.05      # Anteil Regenpixel, ab dem das ganze Bild in OpenCV schneller ist als nur die Regenpixel (gemessen 16.11.2026)
+
     def compose(self, dbz_crop):
         """Ein Radarbild (dBZ, Ausschnitt) einfärben: Karte darunter, Ortsnamen darüber. Ganz trocken → das fertige Kartenbild
-        (dasselbe Objekt, nicht verändern). Seit 0.20.0 ganz in OpenCV, ≈ 15× schneller als die NumPy-Fassung, Abweichung ≤ 1/255."""
+        (dasselbe Objekt, nicht verändern). Seit 0.20.0: bis VOLLBILD_AB nur die Regenpixel, darüber das ganze Bild in OpenCV
+        (bei viel Regen ≈ 6–15× schneller als bis 0.19.0), Abweichung ≤ 1/255."""
         if float(dbz_crop.max()) <= STOPS[0][0]:
             return self.dry
         d = cv2.remap(dbz_crop, self.mapx, self.mapy, cv2.INTER_LINEAR, borderValue=-10)
         k = cv2.convertScaleAbs(np.maximum(d, STOPS[0][0]), alpha=4, beta=-4 * STOPS[0][0])     # Stufe über 8 dBZ, 0 … 255
+        n = cv2.countNonZero(k)
+        if n < self.VOLLBILD_AB * k.size:            # wenig Regen: nur die Regenpixel rechnen (gleiche Formel)
+            img = self.dry.copy()
+            if n:
+                nz = np.flatnonzero(k)
+                kk = k.ravel()[nz]
+                out = self._dryf.reshape(-1, 3)[nz] + self._g3.reshape(-1, 3)[nz, :1] * self._lut_farbe[0, kk] \
+                    - self._lut_deck[0, kk, :1] * self._gb.reshape(-1, 3)[nz]
+                img.reshape(-1, 3)[nz] = np.clip(out, 0, 255).astype(np.uint8)
+            return img
         k3 = cv2.merge([k, k, k])
         out = cv2.subtract(cv2.add(self._dryf, cv2.multiply(self._g3, cv2.LUT(k3, self._lut_farbe))),
                            cv2.multiply(cv2.LUT(k3, self._lut_deck), self._gb))
@@ -583,12 +602,12 @@ def video_auf_abruf(cfg, lauf, speicher, out_dir):
     if lauf.meta.get("video"):
         log(f"Video auf Abruf: für Lauf {lauf.meta['t0']} liegt schon eins vor")
         return
-    t = time.time()
+    t, cpu0 = time.time(), cpu_s()
     video_schreiben(cfg, lauf, speicher, tmp_pfad(out_dir, "radar.mp4"))
     os.replace(tmp_pfad(out_dir, "radar.mp4"), os.path.join(out_dir, "radar.mp4"))
     lauf.meta = dict(lauf.meta, video=True, version=lauf.meta["t0_epoch"] + 1, generated=int(time.time()))   # +1: nie gleich einem t0
     meta_schreiben(out_dir, lauf.meta)
-    log(f"Video auf Abruf für Lauf {lauf.meta['t0']}: fertig in {time.time() - t:.1f} s")
+    log(f"Video auf Abruf für Lauf {lauf.meta['t0']}: fertig in {time.time() - t:.1f} s (CPU {cpu_s() - cpu0:.1f} s mit ffmpeg)")
 
 
 # ---------- MQTT: Sensor und Knopf ----------
@@ -719,7 +738,7 @@ def main():
                 p = names[0].split("_")
                 t0 = dt.datetime.strptime(p[2] + p[3], "%Y%m%d%H%M").replace(tzinfo=dt.timezone.utc)
                 if t0 != last_t0:
-                    started = time.time()
+                    started, cpu0 = time.time(), cpu_s()
                     store_past(cfg, t0, m[names[0]])
                     forecast = {int(n.split("_")[4][:3]): m[n] for n in names}
                     now_h5 = read_h5(forecast[0])
@@ -741,7 +760,7 @@ def main():
                         arch.neuer_lauf(t0, forecast)
                     clean_past(cfg, t0)
                     last_t0 = t0
-                    log(f"fertig in {time.time() - started:.1f} s: Lauf {meta['t0']}, Vorhersage {quelle}, "
+                    log(f"fertig in {time.time() - started:.1f} s (CPU {cpu_s() - cpu0:.1f} s mit ffmpeg): Lauf {meta['t0']}, Vorhersage {quelle}, "
                         f"Video {'ja' if meta['video'] else 'nein'}, Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")
                 etag = new
                 last_ok = time.time()
