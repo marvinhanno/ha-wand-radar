@@ -38,6 +38,8 @@ import archiv
 import route
 import vorhersage
 
+cv2.setNumThreads(1)    # seit 0.20.2: auf 2 Kernen bringen OpenCV-Threads nichts (gemessen), sie bremsen nur gegen ffmpeg (x264 nutzt beide Kerne)
+
 DWD = "https://opendata.dwd.de/weather/radar/composite/wn/"
 ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
 SUPERVISOR = "http://supervisor"
@@ -288,7 +290,8 @@ class Scene:
     def crop(self, frames):
         return [f[self.r0:self.r1, self.c0:self.c1] for f in frames]
 
-    VOLLBILD_AB = 0.05      # Anteil Regenpixel, ab dem das ganze Bild in OpenCV schneller ist als nur die Regenpixel (gemessen 16.11.2026)
+    VOLLBILD_AB = 0.16      # Anteil Regenpixel, ab dem das ganze Bild schneller ist als nur die Regenpixel (gemessen 19.11.2026 im Container
+                            # auf dem HA-Rechner, 1 Thread: Vollbild ≈ 20 ms, Regenpixel ≈ 8 ms + 0,75 ms je % Regen; auf dem Mac ≈ 5 %)
 
     def compose(self, dbz_crop):
         """Ein Radarbild (dBZ, Ausschnitt) einfärben: Karte darunter, Ortsnamen darüber. Ganz trocken → das fertige Kartenbild
@@ -297,12 +300,13 @@ class Scene:
         if float(dbz_crop.max()) <= STOPS[0][0]:
             return self.dry
         d = cv2.remap(dbz_crop, self.mapx, self.mapy, cv2.INTER_LINEAR, borderValue=-10)
-        k = cv2.convertScaleAbs(np.maximum(d, STOPS[0][0]), alpha=4, beta=-4 * STOPS[0][0])     # Stufe über 8 dBZ, 0 … 255
+        k = cv2.convertScaleAbs(cv2.max(d, float(STOPS[0][0]), dst=d), alpha=4, beta=-4 * STOPS[0][0])   # Stufe über 8 dBZ, 0 … 255
         n = cv2.countNonZero(k)
         if n < self.VOLLBILD_AB * k.size:            # wenig Regen: nur die Regenpixel rechnen (gleiche Formel)
             img = self.dry.copy()
             if n:
-                nz = np.flatnonzero(k)
+                p = cv2.findNonZero(k).reshape(-1, 2)            # schneller als np.flatnonzero, gleiche Reihenfolge
+                nz = p[:, 1].astype(np.int64) * k.shape[1] + p[:, 0]
                 kk = k.ravel()[nz]
                 out = self._dryf.reshape(-1, 3)[nz] + self._g3.reshape(-1, 3)[nz, :1] * self._lut_farbe[0, kk] \
                     - self._lut_deck[0, kk, :1] * self._gb.reshape(-1, 3)[nz]
