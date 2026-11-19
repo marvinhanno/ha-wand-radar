@@ -80,6 +80,7 @@ in einem Gebiet von ≈ 500 × 500 km um die Kartenmitte:
 ICON-D2-RUC kommt stündlich, ≈ 40 min nach Laufbeginn; die App holt davon nur Laufbeginn + 30 … 225 min (14 Felder, ≈ 11 MB je Stunde) – so weit, wie die +2-h-Vorhersage bei einem bis zu 100 min alten Lauf braucht. Die Zuordnung der Modellzellen
 zum Radargitter wird einmal berechnet und liegt wie der letzte Modelllauf in `/data`. Auf einem Ryzen 5700G kostet die Vorhersage ≈ 0,3 s je Lauf.
 
+- **RUC verspätet** (seit 0.20.3): Fehlt der fällige Lauf beim DWD noch, nimmt die App den neuesten vollständigen der letzten 3 h, sofern er neuer ist als der gehaltene, und versucht den fälligen alle 5 min wieder (ein Log-Eintrag je Verspätung: `Vorhersage: RUC-Lauf 16Z fehlt beim DWD noch (verspätet), nehme 14Z; …`). Bis 0.20.2 blieb die App sonst stundenlang auf dem alten Lauf.
 - **Rückweg:** Bei einem Fehler, oder wenn nach einem Neustart weniger als zwei der drei 10-min-Bildpaare für das Bewegungsfeld vorliegen, nimmt der Lauf
   die DWD-Vorhersage und schreibt den Grund ins Log (`Vorhersage: …`). Fehlt nur das Modell, rechnet die App ohne Einmischen (nur das Bewegungsfeld).
 - **Sparsam:** Zeigt weder das Radar im Gebiet ein Echo ≥ `rain_threshold_dbz` noch das Modell dort Regen, wird nichts gerechnet (alle Felder trocken).

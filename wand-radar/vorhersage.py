@@ -24,6 +24,7 @@ import prognose
 RUC_MINUTEN = range(30, 226, 15)
 RUC_HALTEN = dt.timedelta(hours=3)
 WIEDERHOLEN = 300                     # s bis zum nächsten Versuch, wenn ein RUC-Lauf fehlt oder unvollständig ist
+RUC_ZURUECK = 3                       # h: so weit greift die App auf ältere Läufe zurück, wenn der fällige fehlt (seit 0.20.3)
 UTC = dt.timezone.utc
 
 
@@ -39,6 +40,7 @@ class Vorhersage:
         self.ruc = {}                    # Laufbeginn -> (14, h/2, w/2) dBZ, erstes Feld = Laufbeginn + RUC_MINUTEN[0]
         self.ruc_ab_min = RUC_MINUTEN[0]  # für archiv.AppFall.ruc_dbz
         self.ruc_versuch = 0.0
+        self._verspaetet = None          # fälliger RUC-Lauf, dessen Verspätung schon im Log steht
         self.bewegung = None             # Bewegungsfeld des letzten Laufs (2 km, Rechengebiet, 2-km-Pixel je 5 min) oder None
 
     # ---------- ein Lauf ----------
@@ -122,37 +124,64 @@ class Vorhersage:
 
     # ---------- ICON-D2-RUC ----------
     def ruc_holen(self, t0):
-        """Den RUC-Lauf holen, den die Radarzeit t0 braucht (archiv.RUC_VERZUG nach Laufbeginn), sofern noch nicht da."""
-        lauf = (t0 - dt.timedelta(minutes=archiv.RUC_VERZUG)).replace(minute=0, second=0, microsecond=0)
-        if lauf in self.ruc or time.time() - self.ruc_versuch < WIEDERHOLEN:
+        """Den RUC-Lauf holen, den die Radarzeit t0 braucht (archiv.RUC_VERZUG nach Laufbeginn), sofern noch nicht da. Fehlt er beim DWD
+        (verspätet), seit 0.20.3 den neuesten vollständigen der letzten RUC_ZURUECK Stunden, wenn er neuer ist als der gehaltene;
+        den fälligen weiter alle WIEDERHOLEN s versuchen. Ein Log-Eintrag je verspätetem Lauf, nicht bei jedem Versuch."""
+        faellig = (t0 - dt.timedelta(minutes=archiv.RUC_VERZUG)).replace(minute=0, second=0, microsecond=0)
+        if faellig in self.ruc or time.time() - self.ruc_versuch < WIEDERHOLEN:
             return
+        if self.idx is None and not self._index(faellig):
+            self.ruc_versuch = time.time()
+            return
+        gehalten = max(self.ruc) if self.ruc else None
+        for k in range(RUC_ZURUECK + 1):
+            lauf = faellig - dt.timedelta(hours=k)
+            if gehalten is not None and lauf <= gehalten:
+                break                            # nichts Neueres als der gehaltene Lauf
+            if self._lauf_holen(lauf):
+                break
+        if faellig not in self.ruc:              # beim nächsten Lauf in ≥ 5 min wieder
+            self.ruc_versuch = time.time()
+            if self._verspaetet != faellig:
+                self._verspaetet = faellig
+                ersatz = max(self.ruc) if self.ruc else None
+                self.log(f"Vorhersage: RUC-Lauf {faellig:%H}Z fehlt beim DWD noch (verspätet), "
+                         + (f"nehme {ersatz:%H}Z" if ersatz else "kein älterer Lauf da, rechne ohne RUC") + "; versuche ihn alle 5 min wieder")
+
+    def _index(self, lauf):
+        """Zuordnung Dreieck → Gitter laden oder einmal berechnen (CLAT/CLON eines Laufs)."""
         t = time.time()
-        if self.idx is None:
-            g = self.gebiet
-            p = os.path.join(self.cfg["data_dir"], f"ruc_index_{g.r0}_{g.c0}_{archiv.GROESSE}.npy")   # derselbe wie im Archiv
-            if os.path.exists(p):
-                self.idx = np.load(p)
-            else:
-                clat, clon = archiv.ruc_get("CLAT", lauf, 0), archiv.ruc_get("CLON", lauf, 0)
-                if clat is None or clon is None:
-                    self.ruc_versuch = time.time()
-                    return
+        g = self.gebiet
+        p = os.path.join(self.cfg["data_dir"], f"ruc_index_{g.r0}_{g.c0}_{archiv.GROESSE}.npy")   # derselbe wie im Archiv
+        if os.path.exists(p):
+            self.idx = np.load(p)
+            return True
+        for k in range(RUC_ZURUECK + 1):
+            clat, clon = archiv.ruc_get("CLAT", lauf - dt.timedelta(hours=k), 0), archiv.ruc_get("CLON", lauf - dt.timedelta(hours=k), 0)
+            if clat is not None and clon is not None:
                 self.idx = archiv.ruc_index(g, archiv.lies_grib(clat), archiv.lies_grib(clon))
                 np.save(p, self.idx)
                 self.log(f"Vorhersage: RUC-Gitterzuordnung berechnet ({time.time() - t:.0f} s)")
+                return True
+        return False
+
+    def _lauf_holen(self, lauf):
+        """Alle RUC_MINUTEN-Felder eines Laufs holen; False, solange er beim DWD nicht vollständig ist."""
+        t = time.time()
         felder = []
         for m in RUC_MINUTEN:
             b = archiv.ruc_get("DBZ_CMAX", lauf, m)
-            if b is None:                        # Lauf noch nicht vollständig: beim nächsten Lauf in ≥ 5 min wieder
-                self.ruc_versuch = time.time()
-                return
+            if b is None:
+                return False
             v = archiv.lies_grib(b)[self.idx]
             felder.append(np.maximum(np.nan_to_num(v, nan=prognose.TROCKEN), prognose.TROCKEN))
         c = archiv.kodieren(np.array(felder, np.float32))     # 0,5-dB-Stufen wie in der Messung (Ergebnis gleich, Datei klein)
-        self.ruc = {k: v for k, v in self.ruc.items() if k > lauf - RUC_HALTEN}
+        neuester = max([lauf] + list(self.ruc))
+        self.ruc = {k: v for k, v in self.ruc.items() if k > neuester - RUC_HALTEN}
         self.ruc[lauf] = archiv.dekodieren(c)
         self._ruc_speichern(lauf, c)
         self.log(f"Vorhersage: RUC-Lauf {lauf:%H}Z geholt ({len(felder)} Schritte, {time.time() - t:.1f} s)")
+        return True
 
     def _ruc_speichern(self, lauf, c):
         os.makedirs(self.ordner, exist_ok=True)
