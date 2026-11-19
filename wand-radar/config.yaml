@@ -1,5 +1,5 @@
 name: Wand-Radar
-version: "0.20.3"
+version: "0.21.0"
 slug: wand_radar
 description: Rechnet aus dem DWD-Regenradar (WN) und einer eigenen +2-h-Vorhersage (Radar-Bewegung + ICON-D2-RUC) ein fertiges Standbild und Video für ein Wandpanel.
 url: https://github.com/marvinhanno/ha-wand-radar
@@ -16,8 +16,6 @@ map:
   - type: homeassistant_config
     read_only: false
     path: /config
-  - type: share
-    read_only: false
 options:
   zoom: 9
   width: 1366
@@ -47,6 +45,4 @@ schema:
   panel_width: int(0,1200)?
   panel_height: int(0,1200)?
   panel_zoom: int(0,11)?
-  archiv_tage: int(0,30)?
-  prognose_test: bool?
   prognose: list(eigen|dwd)?

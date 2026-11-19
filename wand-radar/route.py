@@ -402,7 +402,7 @@ class RouteWorker:
         except (ValueError, KeyError):
             pass
         if auto and bahn:              # beide im Fenster: der Quelle folgen (früheres „los“), sonst der frühere Beginn
-            q = self.zustand("sensor.wand_aufbruch_quelle")["state"]
+            q = self.zustand("sensor.aufbruch")["state"]          # termin / reise / aus (seit 0.21.0; bis 0.20.x sensor.wand_aufbruch_quelle)
             if q == "reise" or (q != "termin" and bahn[0] < auto[0]):
                 auto = None
             else:

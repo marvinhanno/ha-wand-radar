@@ -9,7 +9,7 @@ Ausgabe in output_dir:
   still_panel.jpg   dasselbe in klein für ein Bedienpanel (nur mit panel_width/panel_height, eigener Zoom möglich)
   radar.mp4   H.264, -past_minutes … +120 min, je 5-min-Schritt 4 berechnete Zwischenbilder – seit 0.20.0 nur bei Regen im
               Wand-Ausschnitt (trocken: meta.json video: false, kein Video; button.wand_radar_video rechnet es auf Abruf)
-  meta.json   Zeiten, Verlauf am Zuhause-Punkt, Regenbeginn
+  meta.json   Zeiten, Verlauf am Zuhause-Punkt, Regenbeginn (seit 0.21.0 mit Sicherheit und Spanne, prognose.unsicherheit)
 Dazu per MQTT der Sensor "Wand-Radar Regen ab" (sensor.wand_radar_regen_ab) und seit 0.20.0 der Knopf button.wand_radar_video.
 """
 import datetime as dt
@@ -34,7 +34,7 @@ import requests
 from PIL import Image
 from pyproj import Transformer
 
-import archiv
+import prognose
 import route
 import vorhersage
 
@@ -66,7 +66,7 @@ def load_config():
     """Add-on-Optionen aus /data/options.json, lokal aus Umgebungsvariablen (WR_*)."""
     cfg = dict(zoom=9, width=1366, height=1024, past_minutes=60, fps=18, rain_threshold_dbz=14,
                timezone="Europe/Berlin", preset="veryfast", output_dir="out", latitude=None, longitude=None,
-               panel_width=0, panel_height=0, panel_zoom=0, archiv_tage=0, prognose_test=False, prognose="eigen")
+               panel_width=0, panel_height=0, panel_zoom=0, prognose="eigen")
     if os.path.exists("/data/options.json"):
         cfg.update({k: v for k, v in json.load(open("/data/options.json")).items() if v is not None})
     for k in cfg:
@@ -501,9 +501,31 @@ def video_schreiben(cfg, lauf, speicher, pfad):
         f"an ffmpeg {z['write']:.1f} s, warten {time.time() - t:.1f} s, ffmpeg-CPU {cpu1.ru_utime + cpu1.ru_stime - cpu0.ru_utime - cpu0.ru_stime:.1f} s")
 
 
-def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd", speicher=None, bewegung=None, ruc_regen=None):
+def sicherheit_von(t0, start, now, beginne, loc):
+    """Seit 0.21.0: Sicherheit und Spanne des Regenbeginns (prognose.unsicherheit, gemessen am Archiv der Messphase). start: Index des Beginns
+    in times (None = kein Beginn in 2 h oder es regnet jetzt). beginne: {t0_epoch: Beginn_epoch | None} der letzten Läufe, nur im Speicher
+    (nach einem Neustart leer = „neu“); wird hier um diesen Lauf ergänzt und auf t0 − 15 min gekürzt (höchstens 4 Einträge). Kostet keine Rechenzeit."""
+    t0e = int(t0.timestamp())
+    leer = {"regen_ab_frueh": None, "regen_ab_spaet": None, "sicherheit": None}
+    beginn = t0e + (start - now) * STEP * 60 if start is not None else None
+    if beginne is None:
+        return leer
+    erg = leer
+    if beginn is not None:
+        vorher = [(beginne[t0e - j * STEP * 60] - t0e) // 60 if beginne.get(t0e - j * STEP * 60) is not None else None for j in (1, 2, 3)]
+        frueh, spaet, s = prognose.unsicherheit((start - now) * STEP, vorher)
+        erg = {"regen_ab_frueh": loc(t0 + dt.timedelta(minutes=frueh)).isoformat(),
+               "regen_ab_spaet": loc(t0 + dt.timedelta(minutes=spaet)).isoformat(), "sicherheit": s}
+    beginne[t0e] = beginn
+    for k in [k for k in beginne if k < t0e - 3 * STEP * 60]:
+        del beginne[k]
+    return erg
+
+
+def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd", speicher=None, bewegung=None, ruc_regen=None, beginne=None):
     """now_h5: (dBZ, Abdeckung, where) der Analyse; fields: {Minuten: dBZ} für +5 … +120 (eigene oder DWD-Vorhersage).
     bewegung: (Bewegungsfeld, Rechengebiet) der eigenen Vorhersage für die Zwischenbilder, ruc_regen(kasten, maske, km²): RUC-Regen im Ausschnitt.
+    beginne: Regenbeginne der letzten Läufe für die Sicherheit (sicherheit_von), None = ohne.
     Schreibt still.jpg, meta.json (und still_panel.jpg, wenn panel_geo gesetzt), radar.mp4 nur bei Regen im Wand-Ausschnitt
     (sonst video: false, ein altes Video wird gelöscht); gibt den Lauf (mit meta) zurück."""
     speicher = speicher or Bildspeicher()
@@ -565,6 +587,7 @@ def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd"
     end = next((k for k in range(start + 1, len(rain)) if not rain[k]), None) if start is not None else None
     mmh = [round(float(mm_per_h(v)), 2) if v >= thr else 0.0 for v in series]
     rng = range(start, end if end is not None else len(rain)) if start is not None else []
+    sicher = sicherheit_von(t0, start if start is not None and not rain[now] else None, now, beginne, loc)
     meta = {
         "version": int(t0.timestamp()), "generated": int(time.time()),
         "t0": hhmm(t0), "t0_epoch": int(t0.timestamp()),
@@ -581,6 +604,7 @@ def render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo=None, prognose="dwd"
         "summe_mm": round(sum(mmh[k] for k in rng) * STEP / 60, 2),
         "verlauf": mmh[now:now + 24],    # mm/h am Zuhause-Punkt ab jetzt, ein Wert je Schritt (STEP min)
         "prognose": prognose,            # Quelle der Vorhersage dieses Laufs: eigen (DA50) oder dwd (WN)
+        **sicher,                        # seit 0.21.0: regen_ab_frueh, regen_ab_spaet (ISO), sicherheit (hoch/mittel/niedrig) – nur bei Beginn in 2 h, sonst None
         "video": video,                  # seit 0.20.0: false = kein radar.mp4 (trocken), die Karte fordert es per button.wand_radar_video an
     }
     lauf = Lauf(t0, times, crop, echt, now, sc, sc.fluss(*bewegung) if bewegung else None, meta)
@@ -654,7 +678,8 @@ class Mqtt:
     def publish(self, meta):
         if not self.client:
             return
-        keys = ("regnet_jetzt", "regen_ab", "regen_bis", "regen_dauer_min", "max_mm_h", "summe_mm", "t0", "t0_epoch", "verlauf", "prognose")
+        keys = ("regnet_jetzt", "regen_ab", "regen_bis", "regen_dauer_min", "max_mm_h", "summe_mm", "t0", "t0_epoch", "verlauf", "prognose",
+                "regen_ab_frueh", "regen_ab_spaet", "sicherheit")
         p = {k: meta[k] for k in keys}
         p["regen_ab_iso"] = meta["regen_ab_iso"]
         self.client.publish(f"{self.BASE}/state", json.dumps(p), retain=True)
@@ -692,10 +717,10 @@ def main():
     geo = Geo(cfg, lat, lon)
     panel_geo = panel_geometry(cfg, lat, lon)
     publish_card(out_dir)
-    arch = archiv.start(cfg, (lat, lon), read_h5, log)     # nur Messphase der eigenen Vorhersage (archiv_tage, prognose_test)
     eigen = vorhersage.Vorhersage(cfg, (lat, lon), read_h5, past_blob, log) if cfg["prognose"] != "dwd" else None
     speicher = Bildspeicher()
     letzter = None                                   # letzter Lauf, für das Video auf Abruf
+    beginne = {}                                     # Regenbeginne der letzten Läufe (seit 0.21.0, für die Sicherheit; nur im Speicher)
     mq = Mqtt()
     if "SUPERVISOR_TOKEN" in os.environ:
         try:
@@ -757,15 +782,15 @@ def main():
                         fields = dwd_felder(forecast)
                     letzter = render(cfg, geo, t0, now_h5, fields, out_dir, panel_geo, quelle, speicher,
                                      bewegung=(eigen.bewegung, eigen.gebiet) if quelle == "eigen" else None,
-                                     ruc_regen=(lambda *a, t0=t0: eigen.ruc_regen(t0, *a)) if eigen else None)
+                                     ruc_regen=(lambda *a, t0=t0: eigen.ruc_regen(t0, *a)) if eigen else None, beginne=beginne)
                     meta = letzter.meta
                     mq.publish(meta)
-                    if arch:
-                        arch.neuer_lauf(t0, forecast)
                     clean_past(cfg, t0)
                     last_t0 = t0
                     log(f"fertig in {time.time() - started:.1f} s (CPU {cpu_s() - cpu0:.1f} s mit ffmpeg): Lauf {meta['t0']}, Vorhersage {quelle}, "
-                        f"Video {'ja' if meta['video'] else 'nein'}, Regen ab {meta['regen_ab']}, bis {meta['regen_bis']}")
+                        f"Video {'ja' if meta['video'] else 'nein'}, Regen ab {meta['regen_ab']}"
+                        + (f" (Sicherheit {meta['sicherheit']}, {meta['regen_ab_frueh'][11:16]}–{meta['regen_ab_spaet'][11:16]})" if meta["sicherheit"] else "")
+                        + f", bis {meta['regen_bis']}")
                 etag = new
                 last_ok = time.time()
             else:

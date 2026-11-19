@@ -1,4 +1,4 @@
-// wand-radar 1.20 (Routen- und Trainingsmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
+// wand-radar 1.21 (Routen- und Trainingsmodus) – Radar-Hintergrund der Wand-Ansicht aus dem vorgerechneten DWD-Radar (HA-Add-on „Wand-Radar“).
 // Ersetzt weather-radar-card + wand-radar-play. Kein Leaflet: Standbild (still.jpg) und Video (radar.mp4) aus /local/wand-radar/.
 // Zustände: ruhe (Standbild „jetzt“, Karten sichtbar) · laeuft (Video) · angehalten (Video steht, Karten bleiben aus).
 // - ▶ spielt ab (aus Ruhe von vorn, aus „angehalten“ ab dort). ⏸ oder Tippen/Ziehen auf der Zeitleiste hält an.
@@ -9,7 +9,7 @@
 //   holen alle Karten sofort meta.json/route.json. Neu geladen wird nur noch, wenn HA sich nach 60 s nicht zurückgemeldet hat
 //   (kein neues hass mit connected) oder sich die HA-Version geändert hat (Update → neues Frontend). Den Rest macht HA selbst
 //   (Verbindung neu, Zustände, Dashboard neu aufbauen). Jeder Neuladen steht im Logbuch „Wand-Radar“.
-// - Routenmodus (seit 1.4): Steht links die Aufbruch-Karte (sensor.wand_aufbruch_quelle = termin/reise) und die App hat route.json
+// - Routenmodus (seit 1.4): Steht links die Aufbruch-Karte (sensor.aufbruch = termin/reise; seit 1.21, bis 1.20 sensor.wand_aufbruch_quelle) und die App hat route.json
 //   geschrieben, zeichnet die Karte statt des Radars die Route (Esri-Kacheln + SVG). Umschalter „Route | Radar“ unten rechts.
 //   Setzt --wand-mitte (1/0) auf <html>, damit die Wetterkarte in der Mitte ausblendet.
 // - Trainingsmodus (seit 1.7): Ist binary_sensor.wand_training_zeigen an und hat sensor.strava_latest_activity eine Strecke (summary_polyline),
@@ -277,7 +277,7 @@ const WR_HTML = `<div id="root">
 // ---------- Routenkarte (Web-Mercator wie Leaflet, stufenloser Zoom, Kacheln der nächsthöheren ganzen Stufe) ----------
 const WR_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';
 const WR_ZOOM_MAX = 16;                      // höchste Kachelstufe der Esri-Grundkarte; kurze Strecken werden bis dahin herangezoomt
-const WR_ROUTE_STATES = ['sensor.wand_aufbruch_quelle', 'input_text.termin_koordinaten', 'input_datetime.termin_start', 'input_text.termin_ort',
+const WR_ROUTE_STATES = ['sensor.aufbruch', 'input_text.termin_koordinaten', 'input_datetime.termin_start', 'input_text.termin_ort',
   'input_text.wand_reise', 'input_text.wand_reise_live'];
 const wrEsc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const wrIcon = (i, c) => `<ha-icon icon="${i}"${c ? ` style="color:${c}"` : ''}></ha-icon>`;
@@ -543,7 +543,7 @@ class WandRadar extends HTMLElement {
     const r = this._route, st = (e) => this._st(e);
     let ok = false;
     if (this._hass && r && r.aktiv) {
-      const q = st('sensor.wand_aufbruch_quelle');
+      const q = st('sensor.aufbruch');
       if (r.typ === 'auto' && q === 'termin') {
         ok = r.schluessel === `${st('input_text.termin_koordinaten').replace(/\s/g, '')}|${st('input_datetime.termin_start').replace(' ', 'T').slice(0, 16)}`;
       } else if (r.typ === 'bahn' && q === 'reise') {

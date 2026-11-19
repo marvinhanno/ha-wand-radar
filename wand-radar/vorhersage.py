@@ -1,6 +1,6 @@
 """Eigene Regenvorhersage DA50 im Radar-Lauf (Option prognose: eigen | dwd, seit 0.19.0).
 
-Je Lauf, im Rechengebiet ≈ 500 × 500 km um Zuhause (archiv.Gebiet):
+Je Lauf, im Rechengebiet ≈ 500 × 500 km um Zuhause (Gebiet):
 - Analysen t0 … t0 − 20 min aus /data/past (fehlende einzeln vom DWD nachgeladen wie die Vergangenheit des Videos),
 - ICON-D2-RUC DBZ_CMAX, stündlicher Lauf, nur Laufbeginn + 30 … 225 min (14 Felder), auf 2 km; die Zuordnung Dreieck → Gitter liegt
   einmal berechnet in /data, der letzte Lauf kompakt in /data/ruc (übersteht einen Neustart),
@@ -9,14 +9,17 @@ Sparsam: kein Echo ≥ rain_threshold_dbz im Rechengebiet und RUC dort ohne Rege
 felder() gibt None zurück (Grund im Log), wenn die eigene Vorhersage nicht geht; dann nimmt der Lauf die DWD-Vorhersage (WN).
 Seit 0.20.0 für das Video: bewegung (Bewegungsfeld des letzten Laufs, daraus die Zwischenbilder der Vorhersage) und
 ruc_regen() (zeigt RUC im Wand-Ausschnitt Regen in 2 h? – Teil der Regel „trocken = kein Video“).
+Seit 0.21.0 liegen hier auch Rechengebiet, RUC-Abruf und -Zuordnung (bis 0.20.x in archiv.py, das mit der Messphase entfallen ist).
 """
 import datetime as dt
 import os
 import time
 
+import cv2
 import numpy as np
+import requests
+from pyproj import Transformer
 
-import archiv
 import prognose
 
 # Fest (Tor R1, 16.11.2026; Länge nachgerechnet): nur so weit, wie die +2-h-Vorhersage braucht, über 2 h rechnet HA mit met.no.
@@ -26,10 +29,113 @@ RUC_HALTEN = dt.timedelta(hours=3)
 WIEDERHOLEN = 300                     # s bis zum nächsten Versuch, wenn ein RUC-Lauf fehlt oder unvollständig ist
 RUC_ZURUECK = 3                       # h: so weit greift die App auf ältere Läufe zurück, wenn der fällige fehlt (seit 0.20.3)
 UTC = dt.timezone.utc
+RUC = "https://opendata.dwd.de/weather/nwp/v1/m/icon-d2-ruc/p/"
+RUC_VERZUG = 40                       # min nach Laufbeginn, ab denen ein Lauf geholt wird
+GROESSE = 500                         # Kantenlänge des Rechengebiets in km
+UA = {"User-Agent": "ha-wand-radar/0.21 (Home Assistant add-on)"}
+
+
+def kodieren(dbz):
+    return np.where(dbz < 5, 0, np.clip(np.round((dbz + 10) * 2), 1, 255)).astype(np.uint8)
+
+
+def dekodieren(c):
+    return np.where(c == 0, prognose.TROCKEN, c.astype(np.float32) / 2 - 10).astype(np.float32)
+
+
+class Gebiet:
+    """Rechengebiet im DWD-Radargitter (GROESSE km um Zuhause), gleiche Rechnung wie werkzeuge/radar-prognose/daten.py."""
+
+    def __init__(self, where, shape, lat, lon):
+        self.where, self.shape = where, shape
+        self.proj = where["projdef"].decode()
+        tr = Transformer.from_crs("EPSG:4326", self.proj, always_xy=True)
+        self.xul, self.yul = tr.transform(where["UL_lon"], where["UL_lat"])
+        hx, hy = tr.transform(lon, lat)
+        hc, hr = (hx - self.xul) / 1000 - 0.5, (self.yul - hy) / 1000 - 0.5
+        self.r0 = max(0, int(round(hr)) - GROESSE // 2)
+        self.c0 = max(0, int(round(hc)) - GROESSE // 2)
+        self.r1, self.c1 = min(shape[0], self.r0 + GROESSE), min(shape[1], self.c0 + GROESSE)
+        self.home = (int(round(hr)) - self.r0, int(round(hc)) - self.c0)
+
+    def crop(self, a):
+        return np.ascontiguousarray(a[self.r0:self.r1, self.c0:self.c1])
+
+
+def ruc_index(gebiet, clat, clon):
+    """Nächste ICON-Dreieckszelle je 2-km-Pixel (ohne scipy: Zellen einsortieren, die nächste gewinnt, Lücken aus Nachbarn füllen)."""
+    tr = Transformer.from_crs("EPSG:4326", gebiet.proj, always_xy=True)
+    x, y = tr.transform(clon.astype(np.float64), clat.astype(np.float64))
+    col = (x - gebiet.xul) / 1000 - 0.5 - gebiet.c0
+    row = (gebiet.yul - y) / 1000 - 0.5 - gebiet.r0
+    h2, w2 = (gebiet.r1 - gebiet.r0) // 2, (gebiet.c1 - gebiet.c0) // 2
+    j, i = np.floor((col + 0.5) / 2).astype(np.int64), np.floor((row + 0.5) / 2).astype(np.int64)
+    ok = np.nonzero((i >= 0) & (i < h2) & (j >= 0) & (j < w2))[0]
+    d = (col[ok] - (2 * j[ok] + 0.5)) ** 2 + (row[ok] - (2 * i[ok] + 0.5)) ** 2
+    ok = ok[np.argsort(-d)]                      # weiteste zuerst, die nächste Zelle schreibt zuletzt
+    idx = np.full((h2, w2), -1, np.float32)      # float32: Zellnummern < 2^24 bleiben exakt, cv2.dilate geht
+    idx[i[ok], j[ok]] = ok
+    for _ in range(20):
+        if not (idx < 0).any():
+            break
+        idx = np.where(idx < 0, cv2.dilate(idx, np.ones((3, 3), np.uint8)), idx)
+    return idx.astype(np.int64)
+
+
+def ruc_get(var, lauf, minuten):
+    """Ein GRIB2-Feld eines ICON-D2-RUC-Laufs (None, solange es noch nicht da ist)."""
+    url = f"{RUC}{var}/r/{lauf:%Y-%m-%dT%H}%3A00/s/PT{minuten // 60:03d}H{minuten % 60:02d}M.grib2"
+    r = requests.get(url, headers=UA, timeout=60)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.content
+
+
+def lies_grib(blob):
+    import eccodes                                # nur hier gebraucht, Import kostet Zeit
+    g = eccodes.codes_new_from_message(blob)
+    try:
+        v = eccodes.codes_get_values(g).astype(np.float32)
+        fehlt = eccodes.codes_get(g, "missingValue")
+    finally:
+        eccodes.codes_release(g)
+    v[v == fehlt] = np.nan
+    return v
+
+
+class Fall:
+    """Schnittstelle, die prognose.py erwartet (e.fall), aus den Analysebildern in /data/past und den RUC-Läufen im Speicher."""
+
+    def __init__(self, vorhersage):
+        self.a = vorhersage
+        self._analyse = {}
+
+    def analyse(self, t):
+        if t not in self._analyse:
+            p = os.path.join(self.a.cfg["data_dir"], "past", t.strftime("%Y%m%d_%H%M") + ".h5")
+            self._analyse[t] = self.a.gebiet.crop(self.a.read_h5(open(p, "rb").read())[0]) if os.path.exists(p) else None
+        return self._analyse[t]
+
+    def ruc_lauf_fuer(self, t0):
+        ok = [r for r in self.a.ruc if r + dt.timedelta(minutes=RUC_VERZUG) <= t0]
+        return max(ok) if ok else None
+
+    def ruc_dbz(self, lauf, t):
+        m = (t - lauf).total_seconds() / 60 - RUC_MINUTEN[0]    # das erste gehaltene Feld ist Laufbeginn + 30 min
+        k = m / 15
+        st = self.a.ruc[lauf]
+        if k < 0 or k > len(st) - 1:
+            return None
+        i = min(int(k), len(st) - 2)
+        f = st[i] + (st[i + 1] - st[i]) * (k - i)
+        h, w = self.a.gebiet.r1 - self.a.gebiet.r0, self.a.gebiet.c1 - self.a.gebiet.c0
+        return cv2.resize(f, (w, h), interpolation=cv2.INTER_LINEAR)
+
 
 
 class Vorhersage:
-    """Hält Rechengebiet, RUC-Zuordnung und RUC-Läufe zwischen den Läufen. Die Felder für archiv.AppFall/prognose.Eingang:
+    """Hält Rechengebiet, RUC-Zuordnung und RUC-Läufe zwischen den Läufen. Die Felder für Fall/prognose.Eingang:
     cfg, gebiet, read_h5, ruc."""
 
     def __init__(self, cfg, home, read_h5, past_blob, log):
@@ -38,7 +144,6 @@ class Vorhersage:
         self.ordner = os.path.join(cfg["data_dir"], "ruc")
         self.gebiet, self.idx = None, None
         self.ruc = {}                    # Laufbeginn -> (14, h/2, w/2) dBZ, erstes Feld = Laufbeginn + RUC_MINUTEN[0]
-        self.ruc_ab_min = RUC_MINUTEN[0]  # für archiv.AppFall.ruc_dbz
         self.ruc_versuch = 0.0
         self._verspaetet = None          # fälliger RUC-Lauf, dessen Verspätung schon im Log steht
         self.bewegung = None             # Bewegungsfeld des letzten Laufs (2 km, Rechengebiet, 2-km-Pixel je 5 min) oder None
@@ -49,7 +154,7 @@ class Vorhersage:
         start = time.time()
         self.bewegung = None
         if self.gebiet is None:
-            self.gebiet = archiv.Gebiet(where, dbz0.shape, *self.home)
+            self.gebiet = Gebiet(where, dbz0.shape, *self.home)
             self._ruc_laden()
         try:
             self.ruc_holen(t0)
@@ -60,7 +165,7 @@ class Vorhersage:
 
         for k in range(1, prognose.ZURUECK):            # liegen meist schon in /data/past (auch nach einem Neustart)
             self.past_blob(self.cfg, t0 - k * prognose.MIN5)
-        fall = archiv.AppFall(self)
+        fall = Fall(self)
         fall._analyse[t0] = self.gebiet.crop(dbz0)
         e = prognose.Eingang(fall, t0)
         paare = sum(e.analysen[a] is not None and e.analysen[b] is not None for a, b in ((4, 2), (3, 1), (2, 0)))
@@ -101,7 +206,7 @@ class Vorhersage:
         Rohwerte des Modells (ohne Angleichen), 15-min-Schritte, 2 km (je Zelle 4 km²)."""
         if self.gebiet is None:
             return None
-        ok = [r for r in self.ruc if r + dt.timedelta(minutes=archiv.RUC_VERZUG) <= t0]
+        ok = [r for r in self.ruc if r + dt.timedelta(minutes=RUC_VERZUG) <= t0]
         if not ok:
             return None
         lauf = max(ok)
@@ -124,10 +229,10 @@ class Vorhersage:
 
     # ---------- ICON-D2-RUC ----------
     def ruc_holen(self, t0):
-        """Den RUC-Lauf holen, den die Radarzeit t0 braucht (archiv.RUC_VERZUG nach Laufbeginn), sofern noch nicht da. Fehlt er beim DWD
+        """Den RUC-Lauf holen, den die Radarzeit t0 braucht (RUC_VERZUG nach Laufbeginn), sofern noch nicht da. Fehlt er beim DWD
         (verspätet), seit 0.20.3 den neuesten vollständigen der letzten RUC_ZURUECK Stunden, wenn er neuer ist als der gehaltene;
         den fälligen weiter alle WIEDERHOLEN s versuchen. Ein Log-Eintrag je verspätetem Lauf, nicht bei jedem Versuch."""
-        faellig = (t0 - dt.timedelta(minutes=archiv.RUC_VERZUG)).replace(minute=0, second=0, microsecond=0)
+        faellig = (t0 - dt.timedelta(minutes=RUC_VERZUG)).replace(minute=0, second=0, microsecond=0)
         if faellig in self.ruc or time.time() - self.ruc_versuch < WIEDERHOLEN:
             return
         if self.idx is None and not self._index(faellig):
@@ -152,14 +257,14 @@ class Vorhersage:
         """Zuordnung Dreieck → Gitter laden oder einmal berechnen (CLAT/CLON eines Laufs)."""
         t = time.time()
         g = self.gebiet
-        p = os.path.join(self.cfg["data_dir"], f"ruc_index_{g.r0}_{g.c0}_{archiv.GROESSE}.npy")   # derselbe wie im Archiv
+        p = os.path.join(self.cfg["data_dir"], f"ruc_index_{g.r0}_{g.c0}_{GROESSE}.npy")
         if os.path.exists(p):
             self.idx = np.load(p)
             return True
         for k in range(RUC_ZURUECK + 1):
-            clat, clon = archiv.ruc_get("CLAT", lauf - dt.timedelta(hours=k), 0), archiv.ruc_get("CLON", lauf - dt.timedelta(hours=k), 0)
+            clat, clon = ruc_get("CLAT", lauf - dt.timedelta(hours=k), 0), ruc_get("CLON", lauf - dt.timedelta(hours=k), 0)
             if clat is not None and clon is not None:
-                self.idx = archiv.ruc_index(g, archiv.lies_grib(clat), archiv.lies_grib(clon))
+                self.idx = ruc_index(g, lies_grib(clat), lies_grib(clon))
                 np.save(p, self.idx)
                 self.log(f"Vorhersage: RUC-Gitterzuordnung berechnet ({time.time() - t:.0f} s)")
                 return True
@@ -170,15 +275,15 @@ class Vorhersage:
         t = time.time()
         felder = []
         for m in RUC_MINUTEN:
-            b = archiv.ruc_get("DBZ_CMAX", lauf, m)
+            b = ruc_get("DBZ_CMAX", lauf, m)
             if b is None:
                 return False
-            v = archiv.lies_grib(b)[self.idx]
+            v = lies_grib(b)[self.idx]
             felder.append(np.maximum(np.nan_to_num(v, nan=prognose.TROCKEN), prognose.TROCKEN))
-        c = archiv.kodieren(np.array(felder, np.float32))     # 0,5-dB-Stufen wie in der Messung (Ergebnis gleich, Datei klein)
+        c = kodieren(np.array(felder, np.float32))     # 0,5-dB-Stufen wie in der Messung (Ergebnis gleich, Datei klein)
         neuester = max([lauf] + list(self.ruc))
         self.ruc = {k: v for k, v in self.ruc.items() if k > neuester - RUC_HALTEN}
-        self.ruc[lauf] = archiv.dekodieren(c)
+        self.ruc[lauf] = dekodieren(c)
         self._ruc_speichern(lauf, c)
         self.log(f"Vorhersage: RUC-Lauf {lauf:%H}Z geholt ({len(felder)} Schritte, {time.time() - t:.1f} s)")
         return True
@@ -205,7 +310,7 @@ class Vorhersage:
                 lauf = dt.datetime.strptime(f[:11], "%Y%m%d_%H").replace(tzinfo=UTC)
                 z = np.load(os.path.join(self.ordner, f))
                 if list(z["gebiet"]) == [self.gebiet.r0, self.gebiet.c0] and len(z["dbz"]) == len(RUC_MINUTEN):
-                    self.ruc[lauf] = archiv.dekodieren(z["dbz"])
+                    self.ruc[lauf] = dekodieren(z["dbz"])
             except Exception:
                 continue
         if self.ruc:

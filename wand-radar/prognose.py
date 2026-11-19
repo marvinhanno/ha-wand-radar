@@ -4,8 +4,8 @@ DA50 = A (dichtes Bewegungsfeld aus den letzten Radar-Analysen, konstant, Rückw
 + ICON-D2-RUC eingemischt, Gewicht linear 0 → 0,5 bei +120 min, RUC vorher per Quantil-Abgleich an das Radar angeglichen.
 Ergebnis: np.ndarray (24, Zeilen, Spalten) in dBZ für +5 … +120 min. Nur numpy/cv2.
 
-Schlanke Kopie von werkzeuge/radar-prognose/kandidaten.py (Mess-Werkzeug, dort die Quelle): nur die Teile für DA50,
-die Funktionen wörtlich übernommen. Einzige Abweichung: Eingang liest nur die Analysen 0 … 20 min zurück (mehr braucht A nicht).
+Schlanke Kopie von werkzeuge/radar-prognose/kandidaten.py (Mess-Werkzeug, dort die Quelle): nur die Teile für DA50 und seit 0.21.0
+unsicherheit() (Sicherheit und Spanne von „Regen ab“), die Funktionen wörtlich übernommen. Einzige Abweichung: Eingang liest nur die Analysen 0 … 20 min zurück (mehr braucht A nicht).
 Erwartet von e.fall: analyse(t), ruc_lauf_fuer(t0), ruc_dbz(lauf, t).
 """
 import datetime as dt
@@ -192,4 +192,31 @@ def mit_ruc(basis_fn, ende=0.5, name=None):
 
 DA50 = mit_ruc(A, 0.5, "DA50")
 
-ALLE = {"A": A, "DA50": DA50}
+
+# ---------- Phase 4: Unsicherheit von „Regen ab“ (seit 0.21.0; Plan „Phase 4“, Messung messung.md „Phase 4“ im privaten Konfig-Repo) ----------
+# Kalibriert am Archiv 25.10.–16.11.2026 (2616 trockene Läufe, 347 mit Regenbeginn in 2 h, 43 echte Regenbeginne). Kostet nichts: nur der
+# Vorlauf des Laufs und die Regenbeginne der drei Läufe davor (die App behält sie im Speicher). Verworfen, weil ohne Aussage über den Fehler:
+# Streuung über Nachbarpunkte (±5 … 20 km), A gegen DA50, RUC allein (messung.md).
+SICHER_HOCH = 15           # min Vorlauf: bis hierhin „hoch“ …
+SICHER_HOCH_EINIG = 30     # … bis hierhin, wenn die drei Läufe davor denselben Beginn sahen (±5 min)
+SICHER_NIEDRIG = 60        # min Vorlauf: darüber „niedrig“ …
+SICHER_NIEDRIG_NEU = 30    # … schon darüber, wenn keiner der drei Läufe davor Regen sah (neu aufgetaucht, auch nach einem Neustart)
+EINIG_MIN = 5
+SPANNE_FRUEH = 0.5         # ab_frueh = ab − 0,5 × Vorlauf (Regen kommt bei langem Vorlauf eher früher als vorhergesagt)
+SPANNE_SPAET = 0.25        # ab_spaet = ab + 0,25 × Vorlauf; beide auf 5 min gerundet, früh nie vor +5 min
+
+
+def unsicherheit(ab_min, vorher):
+    """ab_min: vorhergesagter Regenbeginn in min ab t0 (5 … 120); vorher: Regenbeginne der Läufe t0 − 5/10/15 min, umgerechnet in min ab t0
+    (None = Lauf fehlt oder sah in 2 h keinen Regen). Gibt (frueh_min, spaet_min, sicherheit) mit sicherheit hoch/mittel/niedrig."""
+    da = [v for v in vorher if v is not None]
+    einig = len(da) == 3 and all(abs(v - ab_min) <= EINIG_MIN for v in da)
+    if ab_min <= SICHER_HOCH or (einig and ab_min <= SICHER_HOCH_EINIG):
+        s = "hoch"
+    elif ab_min > SICHER_NIEDRIG or (not da and ab_min > SICHER_NIEDRIG_NEU):
+        s = "niedrig"
+    else:
+        s = "mittel"
+    frueh = max(5, ab_min - 5 * round(SPANNE_FRUEH * ab_min / 5))
+    spaet = ab_min + 5 * round(SPANNE_SPAET * ab_min / 5)
+    return frueh, spaet, s

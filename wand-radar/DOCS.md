@@ -27,13 +27,20 @@ Prüft jede Minute, ob der DWD ein neues Radarbild (`composite_wn__LATEST.tar`) 
 5. MQTT-Sensor `sensor.wand_radar_regen_ab` (Zeitstempel des Regenbeginns am Zuhause-Punkt, sonst „unbekannt“) mit den
    Attributen `regnet_jetzt`, `regen_ab`, `regen_bis`, `regen_dauer_min`, `max_mm_h`, `summe_mm`, `t0`, `verlauf` (mm/h am Zuhause-Punkt, 24 × 5 min ab jetzt)
    und seit 0.19.0 `prognose` (`eigen` oder `dwd`: welche Vorhersage dieser Lauf tatsächlich genommen hat; steht auch in `meta.json`).
+   Seit 0.21.0 außerdem, wie sicher der Regenbeginn ist (nur wenn es jetzt nicht regnet und Regen in den nächsten 2 h kommt, sonst leer; auch in `meta.json`):
+   `sicherheit` (`hoch` / `mittel` / `niedrig`) und die Spanne `regen_ab_frueh` / `regen_ab_spaet` (ISO-Zeiten). Regel (`prognose.unsicherheit`, gemessen an
+   drei Wochen Radar): `hoch` bei höchstens 15 min Vorlauf oder höchstens 30 min, wenn die drei Läufe davor denselben Beginn (±5 min) sahen; `niedrig` bei mehr als
+   60 min Vorlauf oder mehr als 30 min, wenn keiner der drei Läufe davor Regen sah (neu aufgetaucht, auch nach einem Neustart); sonst `mittel`.
+   Spanne = Beginn − 0,5 × Vorlauf … Beginn + 0,25 × Vorlauf (auf 5 min, früh nie vor +5 min); der echte Beginn lag in der Messung zu 81 % darin.
+   Kostet keine Rechenzeit (die App merkt sich nur die Regenbeginne der letzten vier Läufe im Speicher). Das Video bleibt unverändert.
    Bleiben neue Daten länger als 30 min aus, wird der Sensor „nicht verfügbar“.
    Seit 0.20.0 außerdem der Knopf `button.wand_radar_video` („Video rechnen“, MQTT-Discovery am selben Gerät): rechnet das Video zum letzten Lauf, wenn keins vorliegt.
 6. **Route** (eigener Thread, `route.py`, seit 0.3.0): schreibt jede Minute bei Bedarf `route.json` neben die Radardateien –
    die Strecke, die die Karte im Routenmodus als Hintergrund zeichnet. Gelesen werden die HA-Helfer `input_text.termin_koordinaten`,
    `input_datetime.termin_start`, `input_number.termin_fahrzeit`, `input_number.termin_puffer`, `input_text.wand_reise`,
-   `input_boolean.wand_aufbruch_weg`, `input_boolean.dienstreise_modus` und `sensor.wand_aufbruch_quelle`
-   (Namen aus der persönlichen HA-Einrichtung; ohne sie bleibt die Route aus).
+   `input_boolean.wand_aufbruch_weg`, `input_boolean.dienstreise_modus` und den Zustand von `sensor.aufbruch` (`termin` / `reise` / `aus`: welche
+   Aufbruch-Karte gerade gilt; nur gebraucht, wenn Termin und Bahnreise zugleich im Fenster sind; bis 0.20.x `sensor.wand_aufbruch_quelle`)
+   (Namen aus der persönlichen HA-Einrichtung; ohne sie bleibt die Route aus). Die Karte (ab 1.21) liest denselben Zustand für den Routenmodus.
    - Auto (seit 0.6.0 einzige Quelle der Fahrzeit): einmal je Ziel (Termine bis 24 h voraus) die Fahrzeit ohne Verkehr von OSRM
      (kostenlos) → HA-Helfer `termin_fahrzeit`/`termin_km`, `termin_stau` = 0, `input_text.termin_fahrzeit_quelle` = `frei`,
      `input_datetime.termin_fahrzeit_stand`. Verkehr von Waze erst ab 60 min vor „los“ (los geschätzt mit 1,5 × Fahrzeit ohne
@@ -105,8 +112,10 @@ zum Radargitter wird einmal berechnet und liegt wie der letzte Modelllauf in `/d
 | `panel_width`, `panel_height` | 0 (aus) | Größe eines zweiten, kleinen Standbilds `still_panel.jpg` (nur „jetzt“, gleiche Farben und Karte wie `still.jpg`, Mitte = dieselbe Kartenmitte) für ein kleines Bedienpanel, z. B. 600×720. Wird nur zusammen mit dem Standbild der Wand und nur bei einem neuen Radarlauf gerechnet (ein Bild, < 2 s), nicht als Video. 0 = es entsteht keine Datei (eine vorhandene alte Datei wird dann gelöscht, ebenso nach einem Fehler beim Rechnen) |
 | `panel_zoom` | 0 | Kartenzoom des Panel-Standbilds; 0 = wie `zoom`. Ein kleinerer Wert zeigt ein größeres Gebiet (Zoom 8 bei 600 px ≈ 230 km breit) |
 | `prognose` | eigen | Quelle der Vorhersage +5 … +120 min: `eigen` (DA50, s. „Eigene Vorhersage“) oder `dwd` (DWD-Vorhersage aus dem Radarlauf, Verhalten bis 0.18.0) |
-| `archiv_tage` | 0 (aus) | **Nur für eine Messphase** (eigene Regenvorhersage, seit 0.17.0): legt je Lauf das Analysebild (≈ 500 × 500 km um Zuhause, 1 km), alle 15 min die DWD-Vorhersage bei +30/+60/+120 min samt Reihe am Zuhause-Punkt und je Stunde einen ICON-D2-RUC-Lauf (`DBZ_CMAX` 0 … 240 min, 2 km) nach `/share/wand-radar-archiv/`; Tage älter als `archiv_tage` werden gelöscht. ≈ 50 MB je Regentag, ≈ 14 MB Download je Stunde für RUC. Eigener Thread mit Log-Präfix `Archiv:` – ein Fehler dort hält das Radar nicht auf |
-| `prognose_test` | aus | **Nur für die Messphase:** rechnet alle 15 min die Vorhersage-Kandidaten aus `prognose.py` (seit 0.19.0 nur noch A und DA50; bis 0.18.0 A, A2, Bm, D) zusätzlich und schreibt nur die Rechenzeiten ins Log (`Prognose-Test: …`). Ändert keine Ausgabe. Holt dafür wie `archiv_tage` stündlich ICON-D2-RUC |
+
+Bis 0.20.x gab es für die Messphase der eigenen Vorhersage zusätzlich `archiv_tage` (Archiv in `/share/wand-radar-archiv/`) und `prognose_test`
+(Rechenzeiten der Kandidaten im Log). Beide sind seit 0.21.0 entfallen, die App bindet `/share` nicht mehr ein; noch gesetzte Werte ignoriert der Supervisor
+(Warnung „Unknown option“), sie können aus der Konfiguration gelöscht werden.
 
 Route lokal testen: `HA_URL`/`HA_TOKEN` setzen, `WR_ROUTE_JETZT=<ISO-Zeit>` und `WR_ROUTE_REISE=<JSON wie wand_reise>` simulieren Zeit und Reise, `python wand-radar/wand_radar.py --route-once`.
 
